@@ -147,8 +147,13 @@ def _check_temporal_order(df, feature_col, time_col):
     if non_null_mask.sum() == 0:
         return True
 
-    # TODO: actually use first_non_null_idx to check position
     first_non_null_idx = non_null_mask.idxmax()
+    first_idx = df.index[0]
+    
+    is_lagged = any(k in feature_col for k in ['lag', 'rolling', 'recent'])
+    if is_lagged and first_non_null_idx == first_idx:
+        return False
+        
     return True
 
 
