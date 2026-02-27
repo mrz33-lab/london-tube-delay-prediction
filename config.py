@@ -100,16 +100,18 @@ class ModelConfig:
         'naive', 'ridge', 'lightgbm'
     ])
 
-    lightgbm_params: dict = field(default_factory=lambda: {
-        'num_leaves': [15, 31, 63, 127],
-        'max_depth': [3, 5, 7, -1],
-        'learning_rate': [0.01, 0.05, 0.1],
-        'n_estimators': [100, 200, 300, 500],
-        'min_child_samples': [20, 50, 100],
-        'subsample': [0.7, 0.8, 0.9, 1.0],
-        'colsample_bytree': [0.7, 0.8, 0.9, 1.0],
-        'reg_alpha': [0.0, 0.1, 1.0],
-        'reg_lambda': [0.0, 0.1, 1.0]
+    optuna_n_trials: int = 50
+
+    lightgbm_optuna_space: dict = field(default_factory=lambda: {
+        'num_leaves': {'low': 15, 'high': 127},
+        'max_depth': {'low': 3, 'high': 10},
+        'learning_rate': {'low': 0.01, 'high': 0.2},
+        'n_estimators': {'low': 50, 'high': 500},
+        'min_child_samples': {'low': 10, 'high': 100},
+        'subsample': {'low': 0.5, 'high': 1.0},
+        'colsample_bytree': {'low': 0.5, 'high': 1.0},
+        'reg_alpha': {'low': 1e-8, 'high': 10.0},
+        'reg_lambda': {'low': 1e-8, 'high': 10.0}
     })
 
     ridge_params: dict = field(default_factory=lambda: {
