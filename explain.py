@@ -118,7 +118,7 @@ def compute_shap_values(explainer, model, X, config, max_samples=None):
             X_transformed = X_sample
 
         logger.info(f"Computing SHAP values for {len(X_sample)} samples...")
-        shap_values = explainer(X_transformed)
+        shap_values = explainer(X_transformed, check_additivity=False)
         logger.info("SHAP values computed")
         return shap_values
 
