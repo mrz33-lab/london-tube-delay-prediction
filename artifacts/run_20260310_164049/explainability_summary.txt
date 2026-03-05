@@ -1,0 +1,62 @@
+Explainability Summary
+================================================================================
+
+Model: lightgbm
+Feature count: 47
+Test samples explained: 9
+
+Outputs:
+  - shap_beeswarm.png  (global feature importance)
+  - shap_bar.png       (mean |SHAP| per feature)
+  - feature_importance.png / .csv
+  - shap_waterfall_example_*.png  (3 local explanations)
+  - explanations.txt
+
+Features:
+  - num__temp_c
+  - num__precipitation_mm
+  - num__humidity
+  - num__crowding_index
+  - num__is_weekend
+  - num__hour
+  - num__day_of_week
+  - num__month
+  - num__peak_time
+  - num__is_holiday
+  - num__lag_delay_1
+  - num__lag_delay_3
+  - num__rolling_mean_delay_3
+  - num__rolling_mean_delay_12
+  - num__rolling_std_delay_12
+  - num__recent_disruption_rate
+  - num__temp_delta_1h
+  - num__precipitation_delta_1h
+  - num__crowding_x_peak
+  - num__precipitation_x_temp
+  - num__network_avg_delay
+  - num__network_delay_volatility
+  - num__lines_disrupted_ratio
+  - num__is_network_wide_disruption
+  - num__hour_sin
+  - num__hour_cos
+  - num__is_late_night
+  - num__is_early_morning
+  - num__line_length_km
+  - num__n_stations
+  - num__n_interchange_stations
+  - num__is_deep_tube
+  - num__zone_coverage
+  - num__trains_per_hour
+  - num__service_headway_min
+  - num__capacity_pressure
+  - cat__line_Bakerloo
+  - cat__line_Central
+  - cat__line_Circle
+  - cat__line_District
+  - cat__line_Hammersmith & City
+  - cat__line_Jubilee
+  - cat__line_Metropolitan
+  - cat__line_Northern
+  - cat__line_Piccadilly
+  - cat__line_Victoria
+  - cat__line_Waterloo & City

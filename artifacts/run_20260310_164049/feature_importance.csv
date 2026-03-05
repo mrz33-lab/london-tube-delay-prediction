@@ -1,0 +1,11 @@
+feature,importance
+num__rolling_mean_delay_12,0.0
+num__rolling_std_delay_12,0.0
+num__recent_disruption_rate,0.0
+num__temp_delta_1h,0.0
+num__precipitation_delta_1h,0.0
+num__crowding_x_peak,0.0
+num__precipitation_x_temp,0.0
+num__network_avg_delay,0.0
+num__lag_delay_3,0.0
+cat__line_Waterloo & City,0.0

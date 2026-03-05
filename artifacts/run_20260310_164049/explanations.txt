@@ -1,0 +1,21 @@
+SHAP Prediction Explanations
+================================================================================
+
+Prediction #1: 6.5 minutes delay
+Main contributing factors:
+  - cat__line_Waterloo & City: decreases delay by 0.00 minutes
+  - num__lag_delay_3: decreases delay by 0.00 minutes
+  - num__network_avg_delay: decreases delay by 0.00 minutes
+
+Prediction #2: 6.5 minutes delay
+Main contributing factors:
+  - cat__line_Waterloo & City: decreases delay by 0.00 minutes
+  - num__lag_delay_3: decreases delay by 0.00 minutes
+  - num__network_avg_delay: decreases delay by 0.00 minutes
+
+Prediction #3: 6.5 minutes delay
+Main contributing factors:
+  - cat__line_Waterloo & City: decreases delay by 0.00 minutes
+  - num__lag_delay_3: decreases delay by 0.00 minutes
+  - num__network_avg_delay: decreases delay by 0.00 minutes
+

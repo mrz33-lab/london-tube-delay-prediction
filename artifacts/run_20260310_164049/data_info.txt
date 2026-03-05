@@ -1,0 +1,40 @@
+Data mode: REAL
+Shape: (44, 14)
+Date range: 2026-03-05 17:07:00 to 2026-03-08 01:23:00
+
+Columns:
+['timestamp', 'line', 'status', 'delay_minutes', 'temp_c', 'precipitation_mm', 'humidity', 'crowding_index', 'is_weekend', 'hour', 'day_of_week', 'month', 'peak_time', 'is_holiday']
+
+Data types:
+timestamp           datetime64[ns]
+line                        object
+status                      object
+delay_minutes              float64
+temp_c                     float64
+precipitation_mm           float64
+humidity                     int64
+crowding_index             float64
+is_weekend                   int64
+hour                         int64
+day_of_week                  int64
+month                        int64
+peak_time                    int64
+is_holiday                   int64
+dtype: object
+
+Missing values:
+timestamp           0
+line                0
+status              0
+delay_minutes       0
+temp_c              0
+precipitation_mm    0
+humidity            0
+crowding_index      0
+is_weekend          0
+hour                0
+day_of_week         0
+month               0
+peak_time           0
+is_holiday          0
+dtype: int64
