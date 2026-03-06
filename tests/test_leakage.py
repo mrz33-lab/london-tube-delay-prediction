@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from config import get_config
 from features import engineer_features
 from data import generate_synthetic_data
+from utils import check_data_leakage
 
 
 def test_lag_features_no_leakage():
@@ -187,6 +188,22 @@ def test_first_observation_has_nan_lags():
 
     assert pd.isna(df_featured['lag_delay_1'].iloc[0])
     assert pd.isna(df_featured['rolling_mean_delay_3'].iloc[0])
+
+
+def test_check_data_leakage_utils():
+    # Construct a dummy dataframe
+    df = pd.DataFrame({
+        'timestamp': pd.date_range(start='2024-01-01', periods=5, freq='1h'),
+        'line': ['Central'] * 5,
+        'lag_feature': [np.nan, 2.0, 3.0, 4.0, 5.0],
+        'bad_lag_feature': [1.0, 2.0, 3.0, 4.0, 5.0]
+    })
+    
+    # lag_feature starts with NaN, so it's valid
+    assert check_data_leakage(df, 'lag_feature', group_col='line') is True
+    
+    # bad_lag_feature doesn't start with NaN, so it's invalid (leakage)
+    assert check_data_leakage(df, 'bad_lag_feature', group_col='line') is False
 
 
 if __name__ == '__main__':
