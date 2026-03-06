@@ -97,3 +97,92 @@ def create_gauge_chart(delay_minutes: float, dark: bool = False) -> go.Figure:
         font=dict(color=font_col),
         margin=dict(l=20, r=20, t=40, b=20),
         height=280,
+    )
+    return fig
+
+
+def create_forecast_chart(
+    predictions: pd.DataFrame,
+    selected_line: str,
+    model_col: str,
+    dark: bool = False,
+) -> go.Figure:
+    """24-hour forecast chart with Â±1 MAE confidence band."""
+    line_df = (
+        predictions[predictions["line"] == selected_line]
+        .sort_values("timestamp")
+        .tail(96)   # last 24 h at 15-min intervals
+    )
+
+    if line_df.empty:
+        fig = go.Figure()
+        fig.add_annotation(text="No data for selected line", showarrow=False)
+        return _plotly_layout(fig, dark=dark)
+
+    mae = float(np.abs(line_df["actual"] - line_df[model_col]).mean())
+
+    line_colour = LINE_COLOURS.get(selected_line, "#003688")
+    r, g, b = int(line_colour[1:3], 16), int(line_colour[3:5], 16), int(line_colour[5:7], 16)
+    rgba_fill = f"rgba({r},{g},{b},0.15)"
+
+    fig = go.Figure()
+
+    # Confidence band
+    fig.add_trace(go.Scatter(
+        x=pd.concat([line_df["timestamp"], line_df["timestamp"].iloc[::-1]]),
+        y=pd.concat([
+            line_df[model_col] + mae,
+            (line_df[model_col] - mae).iloc[::-1],
+        ]),
+        fill="toself",
+        fillcolor=rgba_fill,
+        line=dict(color="rgba(0,0,0,0)"),
+        name="Â±1 MAE band",
+        hoverinfo="skip",
+    ))
+
+    # Actual delays
+    fig.add_trace(go.Scatter(
+        x=line_df["timestamp"],
+        y=line_df["actual"],
+        mode="lines",
+        name="Actual Delay",
+        line=dict(color="#6c757d", width=1.5, dash="dot"),
+        hovertemplate="<b>Actual</b> %{y:.1f} min @ %{x|%H:%M}<extra></extra>",
+    ))
+
+    # Predicted delays
+    fig.add_trace(go.Scatter(
+        x=line_df["timestamp"],
+        y=line_df[model_col],
+        mode="lines+markers",
+        name="Predicted",
+        line=dict(color=line_colour, width=2.5),
+        marker=dict(size=4, color=line_colour),
+        hovertemplate="<b>Predicted</b> %{y:.1f} min @ %{x|%H:%M}<extra></extra>",
+    ))
+
+    fig = _plotly_layout(fig, title=f"Delay Forecast â€” {selected_line} Line", dark=dark)
+    fig.update_layout(
+        height=360,
+        hovermode="x unified",
+        xaxis=dict(title="Time", tickformat="%H:%M"),
+        yaxis=dict(title="Delay (minutes)"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    return fig
+
+
+def create_line_heatmap(predictions: pd.DataFrame, model_col: str, dark: bool = False) -> go.Figure:
+    """Hour-of-day Ã— tube-line heatmap of average predicted delay."""
+    if predictions.empty:
+        return go.Figure()
+
+    predictions = predictions.copy()
+    predictions["hour"] = predictions["timestamp"].dt.hour
+
+    pivot = predictions.pivot_table(
+        values=model_col, index="line", columns="hour", aggfunc="mean"
+    ).reindex(columns=range(24))
+
+    paper_bg = "#0d1117" if dark else "#ffffff"
