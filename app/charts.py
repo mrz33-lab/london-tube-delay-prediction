@@ -186,3 +186,134 @@ def create_line_heatmap(predictions: pd.DataFrame, model_col: str, dark: bool = 
     ).reindex(columns=range(24))
 
     paper_bg = "#0d1117" if dark else "#ffffff"
+    font_col = "#e6edf3" if dark else "#1a1a2e"
+
+    fig = go.Figure(go.Heatmap(
+        z=pivot.values,
+        x=[f"{h:02d}:00" for h in range(24)],
+        y=pivot.index.tolist(),
+        colorscale=[
+            [0.0,  "#00B140"],
+            [0.25, "#FFD300"],
+            [0.55, "#FF6600"],
+            [1.0,  "#DC241F"],
+        ],
+        colorbar=dict(title="Avg Delay (min)", tickfont=dict(color=font_col)),
+        hovertemplate="<b>%{y}</b><br>Hour: %{x}<br>Avg Delay: %{z:.1f} min<extra></extra>",
+    ))
+
+    fig.update_layout(
+        paper_bgcolor=paper_bg,
+        plot_bgcolor=paper_bg,
+        font=dict(color=font_col, family="'Segoe UI', sans-serif"),
+        margin=dict(l=140, r=20, t=50, b=60),
+        title=dict(text="Average Delay by Line & Hour of Day", font=dict(size=15, color=font_col), x=0.01),
+        xaxis=dict(title="Hour of Day", tickangle=-45),
+        yaxis=dict(title=""),
+        height=420,
+    )
+    return fig
+
+
+def create_model_comparison_bar(metrics: Dict, dark: bool = False) -> go.Figure:
+    """Grouped bar chart comparing MAE, RMSE, RÂ² across models."""
+    model_names = [k for k in ("naive", "ridge", "best") if k in metrics]
+    display_names = {"naive": "Naive Baseline", "ridge": "Ridge Regression", "best": "Best Model"}
+    bar_colours   = {"naive": "#6c757d",         "ridge": "#0098D4",           "best": "#003688"}
+
+    mae_vals  = [metrics[m].get("test_mae",  0) for m in model_names]
+    rmse_vals = [metrics[m].get("test_rmse", 0) for m in model_names]
+    r2_vals   = [metrics[m].get("test_r2",   0) for m in model_names]
+
+    fig = make_subplots(
+        rows=1, cols=3,
+        subplot_titles=("Mean Absolute Error (â†“ better)", "RMSE (â†“ better)", "RÂ² Score (â†‘ better)"),
+        shared_yaxes=False,
+    )
+
+    for i, (m, mae, rmse, r2) in enumerate(zip(model_names, mae_vals, rmse_vals, r2_vals)):
+        col = bar_colours[m]
+        name = display_names[m]
+        fig.add_trace(go.Bar(name=name, x=[name], y=[mae],  marker_color=col,
+                             hovertemplate=f"MAE: %{{y:.3f}}<extra></extra>",
+                             showlegend=(i == 0)), row=1, col=1)
+        fig.add_trace(go.Bar(name=name, x=[name], y=[rmse], marker_color=col,
+                             hovertemplate=f"RMSE: %{{y:.3f}}<extra></extra>",
+                             showlegend=False), row=1, col=2)
+        fig.add_trace(go.Bar(name=name, x=[name], y=[r2],   marker_color=col,
+                             hovertemplate=f"RÂ²: %{{y:.4f}}<extra></extra>",
+                             showlegend=False), row=1, col=3)
+
+    paper_bg = "#0d1117" if dark else "#ffffff"
+    plot_bg  = "#161b22" if dark else "#fafbfc"
+    font_col = "#e6edf3" if dark else "#1a1a2e"
+    grid_col = "#30363d" if dark else "#e9ecef"
+
+    fig.update_layout(
+        paper_bgcolor=paper_bg,
+        plot_bgcolor=plot_bg,
+        font=dict(color=font_col, family="'Segoe UI', sans-serif"),
+        barmode="group",
+        showlegend=False,
+        height=380,
+        margin=dict(l=20, r=20, t=70, b=20),
+    )
+    for ax in fig.layout:
+        if ax.startswith("xaxis") or ax.startswith("yaxis"):
+            fig.layout[ax].update(gridcolor=grid_col, linecolor=grid_col)
+
+    return fig
+
+
+def create_feature_importance_chart(feat_df: pd.DataFrame, dark: bool = False) -> go.Figure:
+    """Horizontal bar chart of top 12 SHAP feature importances."""
+    top = feat_df.sort_values("importance", ascending=False).head(12)
+    top = top.sort_values("importance", ascending=True)
+
+    colours = [
+        f"rgba(0,{int(54 + 180 * (v / top['importance'].max()))},136,0.85)"
+        for v in top["importance"]
+    ]
+
+    fig = go.Figure(go.Bar(
+        x=top["importance"],
+        y=top["feature"],
+        orientation="h",
+        marker_color=colours,
+        hovertemplate="<b>%{y}</b><br>SHAP: %{x:.4f}<extra></extra>",
+    ))
+
+    fig = _plotly_layout(fig, title="Top Feature Importances (SHAP)", dark=dark)
+    fig.update_layout(
+        height=420,
+        xaxis_title="Mean |SHAP value|",
+        yaxis_title="",
+        margin=dict(l=160, r=20, t=50, b=20),
+    )
+    return fig
+
+
+def create_error_distribution(predictions: pd.DataFrame, model_col: str, dark: bool = False) -> go.Figure:
+    """Residual histogram with KDE overlay."""
+    errors = predictions["actual"] - predictions[model_col]
+
+    fig = go.Figure()
+    fig.add_trace(go.Histogram(
+        x=errors,
+        nbinsx=60,
+        name="Residuals",
+        marker_color="#0098D4",
+        opacity=0.75,
+        hovertemplate="Error: %{x:.1f} min<br>Count: %{y}<extra></extra>",
+    ))
+
+    # Simple KDE-like overlay using Plotly's smoothed scatter
+    hist_vals, bin_edges = np.histogram(errors.dropna(), bins=60, density=True)
+    bin_centres = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+    scale = len(errors) * (bin_edges[1] - bin_edges[0])
+    fig.add_trace(go.Scatter(
+        x=bin_centres,
+        y=hist_vals * scale,
+        mode="lines",
+        name="Density",
+        line=dict(color="#DC241F", width=2.5),
