@@ -317,3 +317,194 @@ def create_error_distribution(predictions: pd.DataFrame, model_col: str, dark: b
         mode="lines",
         name="Density",
         line=dict(color="#DC241F", width=2.5),
+        hoverinfo="skip",
+    ))
+
+    fig.add_vline(x=0, line=dict(color="#FFD300", width=2, dash="dash"), annotation_text="Zero error")
+
+    fig = _plotly_layout(fig, title="Prediction Error Distribution", dark=dark)
+    fig.update_layout(
+        height=340,
+        xaxis_title="Prediction Error (minutes)",
+        yaxis_title="Count",
+        bargap=0.05,
+    )
+    return fig
+
+
+def create_scatter_actual_vs_pred(predictions: pd.DataFrame, model_col: str, dark: bool = False) -> go.Figure:
+    """
+    Build a predicted-vs-actual scatter with a perfect-prediction diagonal.
+    Tight clustering around the diagonal indicates low systematic bias.
+    """
+    errors = np.abs(predictions["actual"] - predictions[model_col])
+    max_val = float(max(predictions["actual"].max(), predictions[model_col].max())) * 1.05
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=predictions["actual"],
+        y=predictions[model_col],
+        mode="markers",
+        name="Predictions",
+        marker=dict(
+            size=4,
+            color=errors,
+            colorscale=[[0, "#00B140"], [0.5, "#FFD300"], [1, "#DC241F"]],
+            colorbar=dict(title="Error (min)"),
+            opacity=0.55,
+        ),
+        hovertemplate="Actual: %{x:.1f} min<br>Predicted: %{y:.1f} min<extra></extra>",
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=[0, max_val], y=[0, max_val],
+        mode="lines",
+        name="Perfect Prediction",
+        line=dict(color="#6c757d", dash="dash", width=1.5),
+        hoverinfo="skip",
+    ))
+
+    fig = _plotly_layout(fig, title="Predicted vs Actual Delays", dark=dark)
+    fig.update_layout(
+        height=420,
+        xaxis=dict(title="Actual Delay (min)", range=[0, max_val]),
+        yaxis=dict(title="Predicted Delay (min)", range=[0, max_val]),
+    )
+    return fig
+
+
+def create_confusion_matrix_chart(predictions: pd.DataFrame, model_col: str, dark: bool = False) -> go.Figure:
+    """Confusion matrix comparing true vs predicted TfL service statuses."""
+    from sklearn.metrics import confusion_matrix
+
+    labels = ["Good Service", "Minor Delays", "Moderate Delays", "Severe Delays"]
+    
+    y_true = predictions["actual"].apply(delay_to_status)
+    y_pred = predictions[model_col].apply(delay_to_status)
+    
+    cm = confusion_matrix(y_true, y_pred, labels=labels)
+    
+    # Calculate row percentages
+    cm_pct = np.zeros_like(cm, dtype=float)
+    row_sums = cm.sum(axis=1)
+    for i in range(len(labels)):
+        if row_sums[i] > 0:
+            cm_pct[i] = (cm[i] / row_sums[i]) * 100
+            
+    # Prepare text annotations
+    text_annotations = []
+    for i in range(len(labels)):
+        row_text = []
+        for j in range(len(labels)):
+            count = cm[i][j]
+            pct = cm_pct[i][j]
+            row_text.append(f"{count}<br>({pct:.1f}%)")
+        text_annotations.append(row_text)
+
+    paper_bg = "#0d1117" if dark else "#ffffff"
+    font_col = "#e6edf3" if dark else "#1a1a2e"
+    
+    # Use a custom TfL-branded Blues scale to match dashboard styling
+    colorscale = [[0.0, paper_bg], [1.0, "#003688"]]
+
+    fig = go.Figure(data=go.Heatmap(
+        z=cm_pct,
+        x=labels,
+        y=labels,
+        text=text_annotations,
+        texttemplate="%{text}",
+        colorscale=colorscale,
+        showscale=True,
+        colorbar=dict(title="% of Actual"),
+        hovertemplate="Actual: %{y}<br>Predicted: %{x}<br>Count: %{text}<extra></extra>"
+    ))
+    
+    fig = _plotly_layout(fig, title="Service Status Confusion Matrix", dark=dark)
+    
+    fig.update_layout(
+        xaxis_title="Predicted Status",
+        yaxis_title="Actual Status",
+        yaxis=dict(autorange="reversed"),
+        height=450,
+        margin=dict(l=120, r=20, t=60, b=60),
+    )
+    
+    return fig
+
+
+def create_line_perf_bar(predictions: pd.DataFrame, model_col: str, dark: bool = False) -> go.Figure:
+    """
+    Compute per-line MAE and render it as a sorted bar chart, coloured by
+    severity so the worst-performing lines are immediately identifiable.
+    """
+    perf = (
+        predictions.groupby("line")
+        .apply(lambda x: np.abs(x["actual"] - x[model_col]).mean())
+        .reset_index()
+        .rename(columns={0: "MAE"})
+        .sort_values("MAE", ascending=False)
+    )
+
+    colours = [
+        STATUS_COLOURS["Severe Delays"]  if v >= 10 else
+        STATUS_COLOURS["Moderate Delays"] if v >= 5  else
+        STATUS_COLOURS["Minor Delays"]   if v >= 2  else
+        STATUS_COLOURS["Good Service"]
+        for v in perf["MAE"]
+    ]
+
+    fig = go.Figure(go.Bar(
+        x=perf["line"],
+        y=perf["MAE"],
+        marker_color=colours,
+        hovertemplate="<b>%{x}</b><br>MAE: %{y:.2f} min<extra></extra>",
+    ))
+
+    fig = _plotly_layout(fig, title="Mean Absolute Error by Tube Line", dark=dark)
+    fig.update_layout(
+        height=340,
+        xaxis_title="",
+        yaxis_title="MAE (minutes)",
+        xaxis_tickangle=-30,
+    )
+    return fig
+
+
+def create_collection_progress_chart(status: Dict, dark: bool = False) -> go.Figure:
+    """
+    Build a radial ring chart showing data collection completion percentage.
+    The donut layout communicates progress more intuitively than a plain
+    progress bar at a glance.
+    """
+    pct = status.get("pct", 0)
+    paper_bg = "#0d1117" if dark else "#ffffff"
+    font_col = "#e6edf3" if dark else "#1a1a2e"
+
+    fig = go.Figure(go.Pie(
+        values=[pct, 100 - pct],
+        hole=0.72,
+        marker_colors=["#003688", "#e9ecef" if not dark else "#30363d"],
+        hoverinfo="none",
+        textinfo="none",
+        direction="clockwise",
+        sort=False,
+    ))
+    fig.add_annotation(
+        text=f"<b>{pct:.1f}%</b>",
+        font=dict(size=30, color=font_col),
+        showarrow=False,
+        x=0.5, y=0.52,
+    )
+    fig.add_annotation(
+        text="complete",
+        font=dict(size=12, color=font_col, family="'Segoe UI', sans-serif"),
+        showarrow=False,
+        x=0.5, y=0.38,
+    )
+    fig.update_layout(
+        paper_bgcolor=paper_bg,
+        showlegend=False,
+        margin=dict(l=10, r=10, t=10, b=10),
+        height=200,
+    )
+    return fig
