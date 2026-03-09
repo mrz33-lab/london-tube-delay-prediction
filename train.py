@@ -11,9 +11,10 @@ import numpy as np
 from sklearn.pipeline import Pipeline
 from sklearn.linear_model import Ridge
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import RandomizedSearchCV, TimeSeriesSplit
+from sklearn.model_selection import RandomizedSearchCV, TimeSeriesSplit, cross_val_score
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 import joblib
+import optuna
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -167,27 +168,57 @@ def train_lightgbm(X_train, y_train, X_test, y_test,
         ))
     ])
 
-    param_grid = {
-        f'regressor__{k}': v for k, v in config.models.lightgbm_params.items()
-    }
-
     tscv = TimeSeriesSplit(n_splits=config.models.cv_splits)
+    X_train_processed = preprocessor.fit_transform(X_train)
 
-    search = RandomizedSearchCV(
-        pipeline,
-        param_distributions=param_grid,
-        n_iter=config.models.n_iter_search,
-        cv=tscv,
-        scoring=config.models.scoring,
-        random_state=RANDOM_SEED,
-        n_jobs=-1,
-        verbose=1
-    )
+    def objective(trial):
+        space = config.models.lightgbm_optuna_space
+        params = {
+            'num_leaves': trial.suggest_int('num_leaves', space['num_leaves']['low'], space['num_leaves']['high']),
+            'max_depth': trial.suggest_int('max_depth', space['max_depth']['low'], space['max_depth']['high']),
+            'learning_rate': trial.suggest_float('learning_rate', space['learning_rate']['low'], space['learning_rate']['high'], log=True),
+            'n_estimators': trial.suggest_int('n_estimators', space['n_estimators']['low'], space['n_estimators']['high']),
+            'min_child_samples': trial.suggest_int('min_child_samples', space['min_child_samples']['low'], space['min_child_samples']['high']),
+            'subsample': trial.suggest_float('subsample', space['subsample']['low'], space['subsample']['high']),
+            'colsample_bytree': trial.suggest_float('colsample_bytree', space['colsample_bytree']['low'], space['colsample_bytree']['high']),
+            'reg_alpha': trial.suggest_float('reg_alpha', space['reg_alpha']['low'], space['reg_alpha']['high']),
+            'reg_lambda': trial.suggest_float('reg_lambda', space['reg_lambda']['low'], space['reg_lambda']['high'])
+        }
 
-    search.fit(X_train, y_train)
-    logger.info(f"Best LightGBM params: {search.best_params_}")
+        model = lgb.LGBMRegressor(
+            random_state=RANDOM_SEED,
+            verbosity=-1,
+            force_col_wise=True,
+            **params
+        )
 
-    best_model = search.best_estimator_
+        scores = cross_val_score(
+            model, X_train_processed, y_train, cv=tscv,
+            scoring=config.models.scoring, n_jobs=-1
+        )
+        
+        # We maximize negative MAE or minimize MAE. Optuna defaults to minimize.
+        # But if scoring is "neg_mean_absolute_error", higher is better (closer to 0).
+        # We should tell Optuna to maximize.
+        return scores.mean()
+
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=RANDOM_SEED))
+    study.optimize(objective, n_trials=config.models.optuna_n_trials, n_jobs=1)
+
+    logger.info(f"Best LightGBM params: {study.best_params}")
+
+    best_model = Pipeline([
+        ('preprocessor', preprocessor),
+        ('regressor', lgb.LGBMRegressor(
+            random_state=RANDOM_SEED,
+            verbosity=-1,
+            force_col_wise=True,
+            **study.best_params
+        ))
+    ])
+    best_model.fit(X_train, y_train)
+
     y_pred_train = best_model.predict(X_train)
     y_pred_test = best_model.predict(X_test)
 
@@ -198,7 +229,7 @@ def train_lightgbm(X_train, y_train, X_test, y_test,
         'test_mae': mean_absolute_error(y_test, y_pred_test),
         'test_rmse': np.sqrt(mean_squared_error(y_test, y_pred_test)),
         'test_r2': r2_score(y_test, y_pred_test),
-        'best_params': search.best_params_
+        'best_params': study.best_params
     }
 
     logger.info(f"LightGBM - Test MAE: {metrics['test_mae']:.3f}, Test RMSE: {metrics['test_rmse']:.3f}")
