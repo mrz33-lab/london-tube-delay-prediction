@@ -156,3 +156,85 @@ def render_prediction_tab(
                                f"{p.std():.2f} min",  f"{p.min():.2f} min", f"{p.max():.2f} min"],
                 }))
 
+
+def render_performance_tab(artifacts: Dict, model_col: str, model_choice: str, dark: bool) -> None:
+    """
+    Render the Performance tab: model comparison bars, detailed metrics table,
+    error analysis charts, per-line MAE, and SHAP feature importance.
+    """
+    metrics    = artifacts.get("metrics", {})
+    test_preds = artifacts.get("test_predictions")
+    feat_imp   = artifacts.get("feature_importance")
+    comp_df    = artifacts.get("model_comparison")
+
+    # ── Model comparison bars ─────────────────────────────────────────────────
+    st.subheader("Model Comparison")
+    if metrics:
+        st.plotly_chart(
+            create_model_comparison_bar(metrics, dark=dark),
+            use_container_width=True,
+        )
+    else:
+        st.info("Metrics not available.")
+
+    # ── Comparison table ─────────────────────────────────────────────────────
+    if comp_df is not None:
+        st.markdown("**Detailed Metrics Table**")
+
+        # Improvement over naive is computed and appended as a column.
+        # "Test MAE" is the actual CSV column name; "MAE" would not match.
+        if "Test MAE" in comp_df.columns and len(comp_df) > 1:
+            naive_mae = comp_df[comp_df["Model"].str.lower() == "naive"]["Test MAE"].values
+            if len(naive_mae):
+                comp_df = comp_df.copy()
+                comp_df["Improvement vs Naive"] = comp_df["Test MAE"].apply(
+                    lambda x: f"{(1 - x / naive_mae[0]) * 100:+.1f}%"
+                )
+
+        def _colour_row(row):
+            if "best" in str(row.get("Model", "")).lower():
+                return ["background-color: rgba(0,177,64,0.15)"] * len(row)
+            return [""] * len(row)
+
+        st.dataframe(
+            comp_df.style.apply(_colour_row, axis=1),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    # ── Error analysis ────────────────────────────────────────────────────────
+    if test_preds is not None:
+        st.subheader("Error Analysis")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.plotly_chart(
+                create_error_distribution(test_preds, model_col, dark=dark),
+                use_container_width=True,
+            )
+        with c2:
+            st.plotly_chart(
+                create_scatter_actual_vs_pred(test_preds, model_col, dark=dark),
+                use_container_width=True,
+            )
+
+        st.subheader("Performance by Tube Line")
+        st.plotly_chart(
+            create_line_perf_bar(test_preds, model_col, dark=dark),
+            use_container_width=True,
+        )
+
+        st.subheader("Service Status Confusion Matrix")
+        st.info(
+            "This matrix shows how well the model predicts the categorical TfL service status "
+            "derived from predicted delay minutes."
+        )
+        st.plotly_chart(
+            create_confusion_matrix_chart(test_preds, model_col, dark=dark),
+            use_container_width=True,
+        )
+
+    # ── Feature importance ────────────────────────────────────────────────────
+    if feat_imp is not None:
+        st.subheader("Feature Importance (SHAP)")
+        st.info(
+            "SHAP (SHapley Additive exPlanations) values quantify each feature's "
