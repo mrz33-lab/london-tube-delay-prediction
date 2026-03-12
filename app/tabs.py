@@ -328,3 +328,106 @@ def render_line_comparison_tab(artifacts: Dict, model_col: str, dark: bool) -> N
     # Also show sortable dataframe
     st.markdown("<br>", unsafe_allow_html=True)
     with st.expander("📊 View as sortable table", expanded=False):
+        df_view = pd.DataFrame(records).rename(columns={
+            "line": "Line", "pred": "Avg Predicted (min)",
+            "actual": "Avg Actual (min)", "mae": "MAE (min)", "n": "Records",
+        })
+        st.dataframe(
+            df_view.style.background_gradient(subset=["Avg Predicted (min)"], cmap="RdYlGn_r"),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+
+def render_trends_tab(artifacts: Dict, model_col: str, selected_line: str, dark: bool) -> None:
+    """
+    Render the Historical Trends tab: time-series of predicted vs actual delays,
+    residuals over time, and an average-delay-by-hour-of-day profile.
+    """
+    test_preds = artifacts.get("test_predictions")
+    if test_preds is None:
+        st.warning("No prediction data available.")
+        return
+
+    st.subheader(f"Historical Accuracy — {selected_line} Line")
+
+    line_df = test_preds[test_preds["line"] == selected_line].sort_values("timestamp")
+
+    if line_df.empty:
+        st.info(f"No data found for {selected_line}.")
+        return
+
+    # ── Time series ──────────────────────────────────────────────────────────
+    lc = LINE_COLOURS.get(selected_line, "#003688")
+    paper_bg = "#0d1117" if dark else "#ffffff"
+    plot_bg  = "#161b22" if dark else "#fafbfc"
+    font_col = "#e6edf3" if dark else "#1a1a2e"
+    grid_col = "#30363d" if dark else "#e9ecef"
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=line_df["timestamp"], y=line_df["actual"],
+        mode="lines", name="Actual", line=dict(color="#6c757d", width=1.5, dash="dot"),
+        hovertemplate="Actual: %{y:.1f} min<extra></extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=line_df["timestamp"], y=line_df[model_col],
+        mode="lines", name="Predicted", line=dict(color=lc, width=2),
+        hovertemplate="Predicted: %{y:.1f} min<extra></extra>",
+    ))
+    fig.update_layout(
+        paper_bgcolor=paper_bg, plot_bgcolor=plot_bg,
+        font=dict(color=font_col), margin=dict(l=20, r=20, t=50, b=20),
+        title=dict(text="Predictions vs Actuals Over Time", font=dict(size=15, color=font_col), x=0.01),
+        xaxis=dict(title="", gridcolor=grid_col),
+        yaxis=dict(title="Delay (minutes)", gridcolor=grid_col),
+        hovermode="x unified", height=360,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    # ── Residuals over time ──────────────────────────────────────────────────
+    residuals = line_df["actual"] - line_df[model_col]
+    fig2 = go.Figure()
+    fig2.add_hline(y=0, line=dict(color="#FFD300", dash="dash", width=1.5))
+    fig2.add_trace(go.Scatter(
+        x=line_df["timestamp"], y=residuals,
+        mode="markers", name="Residual",
+        marker=dict(
+            size=4, opacity=0.55,
+            color=residuals,
+            colorscale=[[0, "#00B140"], [0.5, "#FFD300"], [1, "#DC241F"]],
+        ),
+        hovertemplate="Residual: %{y:.1f} min<extra></extra>",
+    ))
+    fig2.update_layout(
+        paper_bgcolor=paper_bg, plot_bgcolor=plot_bg,
+        font=dict(color=font_col), margin=dict(l=20, r=20, t=50, b=20),
+        title=dict(text="Residuals Over Time", font=dict(size=15, color=font_col), x=0.01),
+        xaxis=dict(gridcolor=grid_col),
+        yaxis=dict(title="Residual (min)", gridcolor=grid_col),
+        height=280, showlegend=False,
+    )
+    st.plotly_chart(fig2, use_container_width=True)
+
+    # ── Hour-of-day pattern ──────────────────────────────────────────────────
+    st.subheader("Seasonal Pattern — Hour of Day")
+    hourly = line_df.copy()
+    hourly["hour"] = hourly["timestamp"].dt.hour
+    hourly_agg = hourly.groupby("hour").agg(
+        actual_mean=("actual", "mean"),
+        pred_mean=(model_col, "mean"),
+    ).reset_index()
+
+    fig3 = go.Figure()
+    fig3.add_trace(go.Scatter(
+        x=hourly_agg["hour"], y=hourly_agg["actual_mean"],
+        mode="lines+markers", name="Actual (avg)",
+        line=dict(color="#6c757d", width=2), marker=dict(size=5),
+    ))
+    fig3.add_trace(go.Scatter(
+        x=hourly_agg["hour"], y=hourly_agg["pred_mean"],
+        mode="lines+markers", name="Predicted (avg)",
+        line=dict(color=lc, width=2), marker=dict(size=5),
+    ))
+    fig3.update_layout(
