@@ -431,3 +431,122 @@ def render_trends_tab(artifacts: Dict, model_col: str, selected_line: str, dark:
         line=dict(color=lc, width=2), marker=dict(size=5),
     ))
     fig3.update_layout(
+        paper_bgcolor=paper_bg, plot_bgcolor=plot_bg,
+        font=dict(color=font_col), margin=dict(l=20, r=20, t=50, b=20),
+        title=dict(text="Average Delay by Hour of Day", font=dict(size=15, color=font_col), x=0.01),
+        xaxis=dict(title="Hour", tickvals=list(range(0, 24, 2)), gridcolor=grid_col),
+        yaxis=dict(title="Avg Delay (min)", gridcolor=grid_col),
+        height=320, hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    st.plotly_chart(fig3, use_container_width=True)
+
+
+def render_data_collection_tab(config, dark: bool) -> None:
+    """
+    Render the Data Collection tab with live progress metrics sourced from
+    the merged CSV, showing collection rate, ETA, and per-line coverage.
+    """
+    st.subheader("Real-Time Data Collection Status")
+
+    with st.spinner("Reading collection data…"):
+        status = load_collection_status(str(config.paths.data_dir))
+
+    # ── Status header ────────────────────────────────────────────────────────
+    active_icon = "🟢 Active" if status["is_active"] else "🔴 Inactive"
+    h_col = "#00B140" if status["is_active"] else "#DC241F"
+    st.markdown(f"""
+    <div style="background:{'#21262d' if dark else '#f8f9fa'};
+                border:1px solid {'#30363d' if dark else '#dee2e6'};
+                border-radius:12px; padding:1.2rem 1.5rem; margin-bottom:1rem;">
+        <div style="display:flex; align-items:center; justify-content:space-between;">
+            <div>
+                <span style="font-size:1.4rem; font-weight:800;">Data Collection</span>
+                <span style="margin-left:1rem; font-size:0.85rem; font-weight:700;
+                             color:{h_col};">● {active_icon}</span>
+            </div>
+            <div style="font-size:0.78rem; color:{'#8b949e' if dark else '#6c757d'};">
+                Target: {DATA_COLLECTION_TARGET:,} records (2 weeks @ 15 min)
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    if not status["has_data"]:
+        st.info(
+            "No data collected yet. Start collection with:\n"
+            "```\npython data_collection.py\n```"
+        )
+        return
+
+    # ── KPI cards ────────────────────────────────────────────────────────────
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.metric("Records Collected", f"{status['record_count']:,}")
+    with c2:
+        rate = status["rate_per_hour"]
+        st.metric("Collection Rate", f"{rate:.0f} rec/hr")
+    with c3:
+        if status["first_ts"] and status["last_ts"]:
+            elapsed = status["last_ts"] - status["first_ts"]
+            d, s = elapsed.days, elapsed.seconds
+            elapsed_str = f"{d}d {s//3600}h {(s%3600)//60}m"
+        else:
+            elapsed_str = "—"
+        st.metric("Time Elapsed", elapsed_str)
+    with c4:
+        if status["eta_hours"] is not None:
+            eta_d = int(status["eta_hours"] // 24)
+            eta_h = int(status["eta_hours"] % 24)
+            eta_str = f"{eta_d}d {eta_h}h"
+        else:
+            eta_str = "Complete"
+        st.metric("ETA to Target", eta_str)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── Progress ring + bar ──────────────────────────────────────────────────
+    ring_col, bar_col = st.columns([1, 2])
+    with ring_col:
+        st.plotly_chart(
+            create_collection_progress_chart(status, dark=dark),
+            use_container_width=True,
+            config={"displayModeBar": False},
+        )
+
+    with bar_col:
+        st.markdown(f"**Progress: {status['record_count']:,} / {status['target']:,} records**")
+        st.progress(min(status["pct"] / 100, 1.0))
+        st.caption(f"{status['pct']:.1f}% complete")
+
+        if status["first_ts"]:
+            st.markdown(f"**First record:** {status['first_ts'].strftime('%Y-%m-%d %H:%M')}")
+        if status["last_ts"]:
+            st.markdown(f"**Last record:** {status['last_ts'].strftime('%Y-%m-%d %H:%M')}")
+
+    # ── Lines present ─────────────────────────────────────────────────────────
+    if status["lines_present"]:
+        st.markdown("**Lines with collected data:**")
+        pills = "".join(
+            f'<span class="line-pill" style="background:{LINE_COLOURS.get(l, "#003688")};">{l}</span>'
+            for l in status["lines_present"]
+        )
+        st.markdown(f'<div style="margin:0.5rem 0;">{pills}</div>', unsafe_allow_html=True)
+
+    # ── How to run ───────────────────────────────────────────────────────────
+    with st.expander("📖 How to run data collection", expanded=False):
+        st.markdown("""
+        **Start continuous collection (every 15 minutes):**
+        ```bash
+        python data_collection.py
+        ```
+
+        **Test a single collection cycle:**
+        ```bash
+        python data_collection.py --once
+        ```
+
+        **Monitor progress:**
+        ```bash
+        python scripts/check_collection_progress.py
+        ```
