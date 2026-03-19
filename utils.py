@@ -103,6 +103,8 @@ def set_random_seeds(seed: int = RANDOM_SEED):
 
 def get_latest_run_id(artifacts_dir: Path) -> Optional[str]:
     """Find the most recent run_* directory."""
+    if not artifacts_dir.exists():
+        return None
     run_dirs = [d for d in artifacts_dir.iterdir() if d.is_dir() and d.name.startswith('run_')]
     if not run_dirs:
         return None

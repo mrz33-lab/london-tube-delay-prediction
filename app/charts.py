@@ -439,7 +439,7 @@ def create_line_perf_bar(predictions: pd.DataFrame, model_col: str, dark: bool =
     """
     perf = (
         predictions.groupby("line")
-        .apply(lambda x: np.abs(x["actual"] - x[model_col]).mean())
+        .apply(lambda x: np.abs(x["actual"] - x[model_col]).mean(), include_groups=False)
         .reset_index()
         .rename(columns={0: "MAE"})
         .sort_values("MAE", ascending=False)
