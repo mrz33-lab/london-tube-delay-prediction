@@ -23,6 +23,12 @@ logger = logging.getLogger(__name__)
 @st.cache_data(show_spinner=False)
 def load_artifacts(artifact_dir: str) -> Dict:
     """Load training artifacts from disk (cached)."""
+    
+    # Fix for unpickling NaiveBaselineModel which was saved in __main__
+    import sys
+    import train
+    sys.modules["__main__"].NaiveBaselineModel = train.NaiveBaselineModel
+    
     path = Path(artifact_dir)
     artifacts: Dict = {}
 

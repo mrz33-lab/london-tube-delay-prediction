@@ -508,3 +508,165 @@ def create_collection_progress_chart(status: Dict, dark: bool = False) -> go.Fig
         height=200,
     )
     return fig
+
+
+def create_network_map_figure(
+    line_delays: Dict,
+    dark: bool = False,
+    highlighted_line: str = None,
+) -> go.Figure:
+    """
+    Build a schematic London Underground map using Plotly.
+
+    Each tube line is drawn as a coloured Scatter trace.
+    If *highlighted_line* is set, that line stays vivid while
+    all others fade to near-transparent.
+
+    Parameters
+    ----------
+    line_delays : dict
+        Mapping of line name → avg delay (minutes) for the current snapshot.
+    dark : bool
+        Dark-mode flag.
+    highlighted_line : str or None
+        If set, only this line is shown at full opacity.
+    """
+    from app.map_data import LINE_PATHS, INTERCHANGE_STATIONS
+
+    paper_bg = "#0d1117" if dark else "#ffffff"
+    font_col = "#e6edf3" if dark else "#1a1a2e"
+
+    fig = go.Figure()
+
+    for line_name, path in LINE_PATHS.items():
+        xs = [p[0] for p in path]
+        ys = [p[1] for p in path]
+        colour = LINE_COLOURS.get(line_name, "#003688")
+        delay  = line_delays.get(line_name, 0.0)
+
+        # Determine status label + colour
+        if delay < 2:
+            status_label, status_col = "Good Service", "#00B140"
+        elif delay < 5:
+            status_label, status_col = "Minor Delays", "#FFD300"
+        elif delay < 10:
+            status_label, status_col = "Moderate Delays", "#FF6600"
+        else:
+            status_label, status_col = "Severe Delays", "#DC241F"
+
+        # Opacity logic: dim non-highlighted lines
+        if highlighted_line and line_name != highlighted_line:
+            opacity = 0.12
+        else:
+            opacity = 1.0
+
+        hover_text = (
+            f"<b>{line_name}</b><br>"
+            f"Avg Delay: {delay:.1f} min<br>"
+            f"Status: {status_label}<br>"
+        )
+
+        fig.add_trace(go.Scatter(
+            x=xs, y=ys,
+            mode="lines+markers",
+            name=line_name,
+            line=dict(color=colour, width=5 if opacity == 1.0 else 3),
+            marker=dict(size=6, color=colour),
+            opacity=opacity,
+            hovertemplate=hover_text + "<extra></extra>",
+            legendgroup=line_name,
+            showlegend=True,
+        ))
+
+    # Interchange station labels
+    ix = [s[0] for s in INTERCHANGE_STATIONS]
+    iy = [s[1] for s in INTERCHANGE_STATIONS]
+    labels = [s[2] for s in INTERCHANGE_STATIONS]
+
+    fig.add_trace(go.Scatter(
+        x=ix, y=iy,
+        mode="markers+text",
+        marker=dict(
+            size=10, color="white" if dark else "white",
+            line=dict(width=2, color="#333333"),
+            symbol="circle",
+        ),
+        text=labels,
+        textposition="top center",
+        textfont=dict(size=8, color=font_col),
+        hoverinfo="text",
+        hovertext=labels,
+        showlegend=False,
+        name="Stations",
+    ))
+
+    fig.update_layout(
+        paper_bgcolor=paper_bg,
+        plot_bgcolor=paper_bg,
+        font=dict(color=font_col, family="'Segoe UI', sans-serif"),
+        margin=dict(l=10, r=10, t=40, b=10),
+        height=600,
+        xaxis=dict(
+            showgrid=False, zeroline=False, showticklabels=False,
+            fixedrange=True,
+        ),
+        yaxis=dict(
+            showgrid=False, zeroline=False, showticklabels=False,
+            scaleanchor="x", scaleratio=1, fixedrange=True,
+        ),
+        title=dict(
+            text="London Underground Network — Live Delay Status",
+            font=dict(size=16, color=font_col),
+            x=0.01,
+        ),
+        legend=dict(
+            orientation="h",
+            yanchor="top", y=-0.02,
+            xanchor="center", x=0.5,
+            font=dict(size=10),
+        ),
+        hovermode="closest",
+        dragmode=False,
+    )
+
+    return fig
+
+
+def create_sensitivity_chart(
+    feature_name: str,
+    feature_values: list,
+    predicted_delays: list,
+    line_name: str,
+    dark: bool = False,
+) -> go.Figure:
+    """
+    Line chart showing how predicted delay changes as a single
+    feature is swept across a range of values. Used by the
+    Scenario Simulator tab for sensitivity analysis.
+    """
+    line_colour = LINE_COLOURS.get(line_name, "#003688")
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=feature_values,
+        y=predicted_delays,
+        mode="lines+markers",
+        name=f"{line_name}",
+        line=dict(color=line_colour, width=3),
+        marker=dict(size=5, color=line_colour),
+        fill="tozeroy",
+        fillcolor=f"rgba({int(line_colour[1:3],16)},{int(line_colour[3:5],16)},{int(line_colour[5:7],16)},0.08)",
+        hovertemplate=(
+            f"<b>{feature_name}</b>: %{{x:.1f}}<br>"
+            f"Predicted Delay: %{{y:.2f}} min<extra></extra>"
+        ),
+    ))
+
+    fig = _plotly_layout(fig, title=f"Sensitivity — {feature_name} vs Delay ({line_name})", dark=dark)
+    fig.update_layout(
+        height=360,
+        xaxis_title=feature_name,
+        yaxis_title="Predicted Delay (min)",
+        hovermode="x unified",
+    )
+    return fig

@@ -24,6 +24,8 @@ from app.tabs import (
     render_trends_tab,
     render_data_collection_tab,
     render_about_tab,
+    render_network_map_tab,
+    render_simulator_tab,
 )
 
 import sys
@@ -81,10 +83,27 @@ def main() -> None:
     dark = st.session_state["dark_mode"]
     apply_custom_css(dark_mode=dark)
 
+    # ── Replay mode (sidebar) ────────────────────────────────────────────────
+    replay_ts = None
+    test_preds = artifacts.get("test_predictions")
+    if test_preds is not None:
+        replay_on = st.sidebar.toggle("⏪ Replay Mode", value=False, key="replay_mode")
+        if replay_on:
+            unique_ts = sorted(test_preds["timestamp"].unique())
+            replay_ts = st.sidebar.select_slider(
+                "Snapshot Time",
+                options=unique_ts,
+                value=unique_ts[-1],
+                format_func=lambda x: str(x)[:16],
+            )
+            st.sidebar.caption(f"Viewing snapshot: {str(replay_ts)[:16]}")
+
     # ── Tabs ─────────────────────────────────────────────────────────────────
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
         "🔮 Predictions",
         "📊 Performance",
+        "🗺️ Network Map",
+        "🧪 Simulator",
         "🚇 Line Comparison",
         "📈 Trends",
         "💾 Data Collection",
@@ -100,15 +119,21 @@ def main() -> None:
         render_performance_tab(artifacts, model_col, model_choice, dark)
 
     with tab3:
-        render_line_comparison_tab(artifacts, model_col, dark)
+        render_network_map_tab(artifacts, model_col, dark, replay_ts=replay_ts)
 
     with tab4:
-        render_trends_tab(artifacts, model_col, selected_line, dark)
+        render_simulator_tab(artifacts, selected_line, model_col, dark)
 
     with tab5:
-        render_data_collection_tab(config, dark)
+        render_line_comparison_tab(artifacts, model_col, dark)
 
     with tab6:
+        render_trends_tab(artifacts, model_col, selected_line, dark)
+
+    with tab7:
+        render_data_collection_tab(config, dark)
+
+    with tab8:
         render_about_tab(artifacts)
 
     # ── Footer ───────────────────────────────────────────────────────────────
