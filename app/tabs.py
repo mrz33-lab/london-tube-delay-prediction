@@ -238,3 +238,93 @@ def render_performance_tab(artifacts: Dict, model_col: str, model_choice: str, d
         st.subheader("Feature Importance (SHAP)")
         st.info(
             "SHAP (SHapley Additive exPlanations) values quantify each feature's "
+            "contribution to individual predictions.  Higher absolute values indicate "
+            "greater influence on the predicted delay."
+        )
+        st.plotly_chart(
+            create_feature_importance_chart(feat_imp, dark=dark),
+            use_container_width=True,
+        )
+    else:
+        st.info("Feature importance data not found. Run `python explain.py` to generate it.")
+
+
+def render_line_comparison_tab(artifacts: Dict, model_col: str, dark: bool) -> None:
+    """
+    Render the Line Comparison tab as a grid of mini-cards, one per line,
+    providing an immediate network-wide situational overview.
+    """
+    test_preds = artifacts.get("test_predictions")
+
+    st.subheader("All Lines — Current Snapshot")
+    st.caption("Mean predicted delay across the latest available data window for each line.")
+
+    if test_preds is None:
+        st.warning("No prediction data available.")
+        return
+
+    # Build per-line summary
+    records = []
+    for line in ALL_LINES:
+        ldf = test_preds[test_preds["line"] == line]
+        if ldf.empty:
+            records.append({"line": line, "pred": 0.0, "actual": 0.0, "mae": 0.0, "n": 0})
+        else:
+            records.append({
+                "line":   line,
+                "pred":   float(ldf[model_col].mean()),
+                "actual": float(ldf["actual"].mean()),
+                "mae":    float(np.abs(ldf["actual"] - ldf[model_col]).mean()),
+                "n":      len(ldf),
+            })
+
+    records.sort(key=lambda x: x["pred"], reverse=True)
+
+    # Render grid (3 columns)
+    cols = st.columns(3)
+    for i, rec in enumerate(records):
+        line  = rec["line"]
+        pred  = rec["pred"]
+        mae   = rec["mae"]
+        lc    = LINE_COLOURS.get(line, "#003688")
+
+        if pred < 2:
+            sc, sl = "#00B140", "Good Service"
+        elif pred < 5:
+            sc, sl = "#FFD300", "Minor Delays"
+        elif pred < 10:
+            sc, sl = "#FF6600", "Moderate Delays"
+        else:
+            sc, sl = "#DC241F", "Severe Delays"
+
+        with cols[i % 3]:
+            st.markdown(f"""
+            <div style="background: {'#21262d' if dark else '#ffffff'};
+                        border: 1px solid {'#30363d' if dark else '#dee2e6'};
+                        border-left: 5px solid {lc};
+                        border-radius: 12px;
+                        padding: 1.1rem 1.2rem;
+                        margin-bottom: 0.8rem;
+                        box-shadow: 0 2px 10px rgba(0,0,0,0.07);">
+                <div style="font-weight:800; font-size:0.95rem; color:{'#e6edf3' if dark else '#1a1a2e'};">
+                    {line}
+                </div>
+                <div style="font-size:2rem; font-weight:800; color:{lc}; margin:0.2rem 0;">
+                    {pred:.1f}<span style="font-size:1rem; font-weight:400;"> min</span>
+                </div>
+                <div>
+                    <span style="background:{sc}20; color:{sc}; border:1px solid {sc};
+                                 border-radius:12px; padding:0.15rem 0.6rem;
+                                 font-size:0.72rem; font-weight:700;">
+                        {sl}
+                    </span>
+                </div>
+                <div style="font-size:0.75rem; color:{'#8b949e' if dark else '#6c757d'}; margin-top:0.5rem;">
+                    MAE: {mae:.2f} min  ·  n={rec['n']:,}
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    # Also show sortable dataframe
+    st.markdown("<br>", unsafe_allow_html=True)
+    with st.expander("📊 View as sortable table", expanded=False):
