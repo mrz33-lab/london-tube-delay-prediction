@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import List, Optional
 import logging
 
+from line_metadata import LINE_LENGTH_KM
+
 
 RANDOM_SEED = 42
 
@@ -44,11 +46,11 @@ class DataConfig:
         'is_weekend', 'hour', 'day_of_week', 'month', 'peak_time', 'is_holiday'
     ])
 
-    tube_lines: List[str] = field(default_factory=lambda: [
-        'Central', 'Jubilee', 'Northern', 'Victoria', 'Piccadilly',
-        'Bakerloo', 'District', 'Circle', 'Metropolitan',
-        'Hammersmith & City', 'Waterloo & City'
-    ])
+    # Single source of truth: derived from line_metadata.LINE_LENGTH_KM keys.
+    # Adding a line to line_metadata automatically makes it valid here too.
+    tube_lines: List[str] = field(
+        default_factory=lambda: list(LINE_LENGTH_KM.keys())
+    )
 
     status_categories: List[str] = field(default_factory=lambda: [
         'Good Service', 'Minor Delays', 'Severe Delays'
@@ -83,9 +85,13 @@ class FeatureConfig:
     target_column: str = 'delay_minutes'
     group_column: str = 'line'
     time_column: str = 'timestamp'
+    # Number of past periods to use when computing the recent disruption rate.
+    # Defaults to 12 (equivalent to 3 hours at 15-min data frequency).
+    disruption_rate_window: int = 12
     exclude_columns: List[str] = field(default_factory=lambda: [
         'timestamp', 'status'
     ])
+
 
 
 @dataclass
@@ -95,6 +101,8 @@ class ModelConfig:
     train_ratio: float = 0.8
     cv_splits: int = 5
     n_iter_search: int = 20
+    # Block size for block bootstrap CI (None = auto: int(sqrt(n)))
+    bootstrap_block_size: Optional[int] = None
 
     models_to_train: List[str] = field(default_factory=lambda: [
         'naive', 'ridge', 'lightgbm'
@@ -127,6 +135,18 @@ class ModelConfig:
 
     scoring: str = 'neg_mean_absolute_error'
 
+    # __post_init__ placed after all field declarations so references to
+    # sibling fields are unambiguous and the class is easy to read top-to-bottom.
+    def __post_init__(self):
+        if not (0.0 < self.train_ratio < 1.0):
+            raise ValueError(f"train_ratio must be in (0, 1), got {self.train_ratio}")
+        if self.cv_splits < 2:
+            raise ValueError(f"cv_splits must be >= 2, got {self.cv_splits}")
+        if self.n_iter_search < 1:
+            raise ValueError(f"n_iter_search must be >= 1, got {self.n_iter_search}")
+        if self.optuna_n_trials < 1:
+            raise ValueError(f"optuna_n_trials must be >= 1, got {self.optuna_n_trials}")
+
 
 @dataclass
 class ExplainabilityConfig:
@@ -136,6 +156,9 @@ class ExplainabilityConfig:
     shap_background_size: int = 100
     top_n_features: int = 10
     n_local_examples: int = 3
+    # Fallback prediction std (minutes) used only when a model was trained
+    # before per-line residual quantiles were introduced.
+    ci_fallback_std: float = 1.5
 
 
 @dataclass

@@ -131,7 +131,10 @@ def test_no_future_information_in_training():
 
         if pd.notna(lag_delay_1):
             previous_delays = df_featured.loc[:idx-1, 'delay_minutes'].values
-            pass
+            assert lag_delay_1 in previous_delays, (
+                f"lag_delay_1 at row {idx} = {lag_delay_1:.2f} is not present "
+                f"in any previous delay value — possible future leakage"
+            )
 
 
 def test_temporal_ordering_preserved():

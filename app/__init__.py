@@ -18,14 +18,11 @@ from app.styles import apply_custom_css
 from app.data_loading import load_artifacts
 from app.components import render_header, render_sidebar
 from app.tabs import (
-    render_prediction_tab,
-    render_performance_tab,
-    render_line_comparison_tab,
-    render_trends_tab,
+    render_live_overview_tab,
+    render_simulator_tab,
+    render_diagnostics_tab,
     render_data_collection_tab,
     render_about_tab,
-    render_network_map_tab,
-    render_simulator_tab,
 )
 
 import sys
@@ -87,7 +84,7 @@ def main() -> None:
     replay_ts = None
     test_preds = artifacts.get("test_predictions")
     if test_preds is not None:
-        replay_on = st.sidebar.toggle("⏪ Replay Mode", value=False, key="replay_mode")
+        replay_on = st.sidebar.toggle("Replay Mode", value=False, key="replay_mode")
         if replay_on:
             unique_ts = sorted(test_preds["timestamp"].unique())
             replay_ts = st.sidebar.select_slider(
@@ -99,49 +96,39 @@ def main() -> None:
             st.sidebar.caption(f"Viewing snapshot: {str(replay_ts)[:16]}")
 
     # ── Tabs ─────────────────────────────────────────────────────────────────
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
-        "🔮 Predictions",
-        "📊 Performance",
-        "🗺️ Network Map",
-        "🧪 Simulator",
-        "🚇 Line Comparison",
-        "📈 Trends",
-        "💾 Data Collection",
-        "ℹ️ About",
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "Live Overview",
+        "Simulator",
+        "Model Diagnostics",
+        "Data Pipeline",
+        "About",
     ])
 
     with tab1:
-        render_prediction_tab(
-            artifacts, selected_line, model_col, model_choice, date_range, dark
+        render_live_overview_tab(
+            artifacts, selected_line, model_col, model_choice, date_range, dark,
+            replay_ts=replay_ts,
         )
 
     with tab2:
-        render_performance_tab(artifacts, model_col, model_choice, dark)
-
-    with tab3:
-        render_network_map_tab(artifacts, model_col, dark, replay_ts=replay_ts)
-
-    with tab4:
         render_simulator_tab(artifacts, selected_line, model_col, dark)
 
-    with tab5:
-        render_line_comparison_tab(artifacts, model_col, dark)
+    with tab3:
+        render_diagnostics_tab(artifacts, model_col, model_choice, selected_line, dark)
 
-    with tab6:
-        render_trends_tab(artifacts, model_col, selected_line, dark)
-
-    with tab7:
+    with tab4:
         render_data_collection_tab(config, dark)
 
-    with tab8:
+    with tab5:
         render_about_tab(artifacts)
 
     # ── Footer ───────────────────────────────────────────────────────────────
     st.markdown(f"""
     <div class="dashboard-footer">
-        <strong>London Underground Delay Predictor</strong> &nbsp;·&nbsp;
+        London Underground Delay Predictor &nbsp;·&nbsp;
         COMP1682 Dissertation &nbsp;·&nbsp; University of Greenwich &nbsp;·&nbsp;
-        Built with Streamlit + Plotly &nbsp;·&nbsp;
+        Built with Streamlit &amp; Plotly &nbsp;·&nbsp;
         Last rendered: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
     </div>
     """, unsafe_allow_html=True)
+

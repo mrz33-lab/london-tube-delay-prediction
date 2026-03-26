@@ -3,6 +3,9 @@ Model training pipeline — naive baseline, Ridge, and LightGBM.
 """
 
 import logging
+import json
+import subprocess
+import sys
 from pathlib import Path
 from typing import Dict, Any, Tuple, Optional
 import time
@@ -23,7 +26,7 @@ import seaborn as sns
 from config import Config, get_config, RANDOM_SEED
 from utils import (
     setup_logging, generate_run_id, save_config, save_metrics,
-    set_random_seeds, format_duration
+    set_random_seeds, format_duration, evaluate_model
 )
 from data import load_data, get_train_test_split, save_data
 from features import (
@@ -47,6 +50,49 @@ except ImportError:
 
 
 logger = logging.getLogger(__name__)
+
+
+def _rmse(y_true, y_pred) -> float:
+    """Root mean squared error — named function for use as a metric callable."""
+    return float(np.sqrt(mean_squared_error(y_true, y_pred)))
+
+
+def _get_git_hash() -> str:
+    """Return the short git commit hash, or 'unknown' if not in a repo."""
+    try:
+        return subprocess.check_output(
+            ['git', 'rev-parse', '--short', 'HEAD'],
+            cwd=Path(__file__).parent,
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+    except Exception:
+        return 'unknown'
+
+
+def _save_model_info(artifact_dir: Path, best_model_name: str, data_mode: str,
+                     metrics: Dict[str, Any]) -> None:
+    """Write model_info.json with reproducibility metadata."""
+    import sklearn
+    try:
+        import lightgbm as lgb
+        lgb_version = lgb.__version__
+    except ImportError:
+        lgb_version = 'not installed'
+
+    info = {
+        'git_commit': _get_git_hash(),
+        'trained_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+        'python_version': sys.version.split()[0],
+        'sklearn_version': sklearn.__version__,
+        'lightgbm_version': lgb_version,
+        'best_model': best_model_name,
+        'data_mode': data_mode,
+        'test_mae': round(metrics.get('test_mae', float('nan')), 4),
+        'test_rmse': round(metrics.get('test_rmse', float('nan')), 4),
+    }
+    with open(artifact_dir / 'model_info.json', 'w') as f:
+        json.dump(info, f, indent=2)
+    logger.info("Saved model_info.json (git=%s)", info['git_commit'])
 
 
 class NaiveBaselineModel:
@@ -73,11 +119,11 @@ class NaiveBaselineModel:
         return self
 
     def predict(self, X):
-        predictions = []
-        for _, row in X.iterrows():
-            pred = self.last_delays_.get(row['line'], self.global_mean_)
-            predictions.append(pred)
-        return np.array(predictions)
+        # Vectorised: map each line to its stored last delay, fall back to
+        # global mean for unseen lines.  10–100x faster than .iterrows().
+        return X['line'].map(
+            lambda line: self.last_delays_.get(line, self.global_mean_)
+        ).to_numpy(dtype=float)
 
 
 def train_naive_baseline(X_train, y_train, X_test, y_test):
@@ -86,17 +132,7 @@ def train_naive_baseline(X_train, y_train, X_test, y_test):
     model = NaiveBaselineModel()
     model.fit(X_train, y_train)
 
-    y_pred_train = model.predict(X_train)
-    y_pred_test = model.predict(X_test)
-
-    metrics = {
-        'train_mae': mean_absolute_error(y_train, y_pred_train),
-        'train_rmse': np.sqrt(mean_squared_error(y_train, y_pred_train)),
-        'train_r2': r2_score(y_train, y_pred_train),
-        'test_mae': mean_absolute_error(y_test, y_pred_test),
-        'test_rmse': np.sqrt(mean_squared_error(y_test, y_pred_test)),
-        'test_r2': r2_score(y_test, y_pred_test)
-    }
+    metrics = evaluate_model(model, X_train, y_train, X_test, y_test)
 
     logger.info(f"Naive baseline - Test MAE: {metrics['test_mae']:.3f}, Test RMSE: {metrics['test_rmse']:.3f}")
     return model, metrics
@@ -135,18 +171,8 @@ def train_ridge_baseline(X_train, y_train, X_test, y_test,
     logger.info(f"Best Ridge alpha: {search.best_params_['regressor__alpha']:.4f}")
 
     best_model = search.best_estimator_
-    y_pred_train = best_model.predict(X_train)
-    y_pred_test = best_model.predict(X_test)
-
-    metrics = {
-        'train_mae': mean_absolute_error(y_train, y_pred_train),
-        'train_rmse': np.sqrt(mean_squared_error(y_train, y_pred_train)),
-        'train_r2': r2_score(y_train, y_pred_train),
-        'test_mae': mean_absolute_error(y_test, y_pred_test),
-        'test_rmse': np.sqrt(mean_squared_error(y_test, y_pred_test)),
-        'test_r2': r2_score(y_test, y_pred_test),
-        'best_params': search.best_params_
-    }
+    metrics = evaluate_model(best_model, X_train, y_train, X_test, y_test)
+    metrics['best_params'] = search.best_params_
 
     logger.info(f"Ridge - Test MAE: {metrics['test_mae']:.3f}, Test RMSE: {metrics['test_rmse']:.3f}")
     return best_model, metrics
@@ -219,18 +245,8 @@ def train_lightgbm(X_train, y_train, X_test, y_test,
     ])
     best_model.fit(X_train, y_train)
 
-    y_pred_train = best_model.predict(X_train)
-    y_pred_test = best_model.predict(X_test)
-
-    metrics = {
-        'train_mae': mean_absolute_error(y_train, y_pred_train),
-        'train_rmse': np.sqrt(mean_squared_error(y_train, y_pred_train)),
-        'train_r2': r2_score(y_train, y_pred_train),
-        'test_mae': mean_absolute_error(y_test, y_pred_test),
-        'test_rmse': np.sqrt(mean_squared_error(y_test, y_pred_test)),
-        'test_r2': r2_score(y_test, y_pred_test),
-        'best_params': study.best_params
-    }
+    metrics = evaluate_model(best_model, X_train, y_train, X_test, y_test)
+    metrics['best_params'] = study.best_params
 
     logger.info(f"LightGBM - Test MAE: {metrics['test_mae']:.3f}, Test RMSE: {metrics['test_rmse']:.3f}")
     return best_model, metrics
@@ -282,18 +298,8 @@ def train_fallback_model(X_train, y_train, X_test, y_test,
     logger.info(f"Best {model_name} params: {search.best_params_}")
 
     best_model = search.best_estimator_
-    y_pred_train = best_model.predict(X_train)
-    y_pred_test = best_model.predict(X_test)
-
-    metrics = {
-        'train_mae': mean_absolute_error(y_train, y_pred_train),
-        'train_rmse': np.sqrt(mean_squared_error(y_train, y_pred_train)),
-        'train_r2': r2_score(y_train, y_pred_train),
-        'test_mae': mean_absolute_error(y_test, y_pred_test),
-        'test_rmse': np.sqrt(mean_squared_error(y_test, y_pred_test)),
-        'test_r2': r2_score(y_test, y_pred_test),
-        'best_params': search.best_params_
-    }
+    metrics = evaluate_model(best_model, X_train, y_train, X_test, y_test)
+    metrics['best_params'] = search.best_params_
 
     logger.info(f"{model_name} - Test MAE: {metrics['test_mae']:.3f}, Test RMSE: {metrics['test_rmse']:.3f}")
     return best_model, metrics, model_name
@@ -345,13 +351,36 @@ def create_diagnostic_plots(y_test, y_pred, model_name, output_dir):
 
 
 def bootstrap_confidence_interval(y_true, y_pred, metric_func,
-                                  n_bootstrap=1000, confidence=0.95):
+                                  n_bootstrap=1000, confidence=0.95,
+                                  block_size=None):
+    """Block bootstrap CI for time-series data.
+
+    Standard i.i.d. bootstrap underestimates uncertainty when residuals are
+    autocorrelated (as delay series typically are).  Sampling contiguous blocks
+    preserves local autocorrelation structure.
+
+    block_size: number of consecutive observations per block.
+                None → auto: int(sqrt(n)).
+    """
     n = len(y_true)
-    bootstrap_metrics = []
+    if block_size is None:
+        block_size = max(1, int(np.sqrt(n)))
+
     rng = np.random.RandomState(RANDOM_SEED)
+    bootstrap_metrics = []
 
     for _ in range(n_bootstrap):
-        indices = rng.choice(n, size=n, replace=True)
+        # sample enough block start positions to cover n observations
+        n_blocks = int(np.ceil(n / block_size))
+        max_start = max(1, n - block_size + 1)
+        starts = rng.randint(0, max_start, size=n_blocks)
+
+        indices = []
+        for start in starts:
+            indices.extend(range(start, min(start + block_size, n)))
+
+        indices = indices[:n]  # trim to original length
+
         y_true_boot = y_true.iloc[indices]
         y_pred_boot = y_pred[indices]
         bootstrap_metrics.append(metric_func(y_true_boot, y_pred_boot))
@@ -517,12 +546,12 @@ def main():
         # ---- BOOTSTRAP CIs ----
         logger.info("\n--- Computing Bootstrap Confidence Intervals ---")
 
+        block_size = config.models.bootstrap_block_size
         mae_point, mae_lower, mae_upper = bootstrap_confidence_interval(
-            y_test, y_pred_best, mean_absolute_error
+            y_test, y_pred_best, mean_absolute_error, block_size=block_size
         )
-        rmse_func = lambda yt, yp: np.sqrt(mean_squared_error(yt, yp))
         rmse_point, rmse_lower, rmse_upper = bootstrap_confidence_interval(
-            y_test, y_pred_best, rmse_func
+            y_test, y_pred_best, _rmse, block_size=block_size
         )
 
         logger.info(f"Best model Test MAE: {mae_point:.3f} (95% CI: [{mae_lower:.3f}, {mae_upper:.3f}])")
@@ -567,6 +596,8 @@ def main():
 
         with open(artifact_dir / 'best_model_name.txt', 'w') as f:
             f.write(best_model_name)
+
+        _save_model_info(artifact_dir, best_model_name, data_mode, all_metrics['best'])
 
         # ---- DONE ----
         elapsed = time.time() - start_time

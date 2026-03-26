@@ -6,7 +6,7 @@ features. Uses shift() throughout to avoid data leakage.
 """
 
 import logging
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
@@ -93,7 +93,7 @@ def engineer_features(
     # === DISRUPTION RATE ===
     df['_is_disrupted'] = (df['status'] != 'Good Service').astype(int)
     df['recent_disruption_rate'] = df.groupby(group_col)['_is_disrupted'].transform(
-        lambda x: x.shift(1).rolling(window=12, min_periods=1).mean()
+        lambda x: x.shift(1).rolling(window=config.features.disruption_rate_window, min_periods=1).mean()
     )
     df = df.drop(columns=['_is_disrupted'])
     logger.info("Created recent_disruption_rate")
@@ -135,8 +135,18 @@ def engineer_features(
 def add_network_effect_features(df: pd.DataFrame, config: Config) -> pd.DataFrame:
     """Add network-wide disruption signals.
 
-    Uses leave-one-out so each line's features come from OTHER lines only.
-    Everything is shifted by 1 period to avoid seeing current-time data.
+    Uses leave-one-out (LOO) so each line's features come from OTHER lines only.
+    The pipeline is:
+      1. Compute the network aggregate at each timestamp T (all lines).
+      2. Subtract the current line's contribution → LOO at T.
+         This is mathematically exact: no leakage of the current line's value
+         into its own network feature.
+      3. Shift the LOO feature back by 1 period → at time T the model sees
+         the other-lines state from T-1, not T.
+
+    The shift in step 3 is conservative but safe.  In a real-time system
+    you could use the T-state (you have all lines simultaneously), but
+    shift(1) keeps the temporal contract identical to all other lag features.
     """
     time_col   = config.features.time_column
     group_col  = config.features.group_column
@@ -284,7 +294,10 @@ def _verify_no_leakage(df: pd.DataFrame, config: Config):
 # feature helpers
 # ---------------------------------------------------------------------------
 
-def get_feature_columns(df, config):
+def get_feature_columns(
+    df: pd.DataFrame,
+    config: Config,
+) -> Tuple[List[str], List[str], List[str]]:
     """Return (numeric_features, categorical_features, all_features)."""
     exclude_cols = set(
         config.features.exclude_columns + [config.features.target_column]
@@ -306,7 +319,10 @@ def get_feature_columns(df, config):
     return numeric_features, categorical_features, numeric_features + categorical_features
 
 
-def create_preprocessing_pipeline(numeric_features, categorical_features):
+def create_preprocessing_pipeline(
+    numeric_features: List[str],
+    categorical_features: List[str],
+) -> ColumnTransformer:
     """StandardScaler for numeric, OneHotEncoder for categorical."""
     transformers = []
     if numeric_features:
@@ -324,9 +340,11 @@ def create_preprocessing_pipeline(numeric_features, categorical_features):
 
 
 def save_feature_metadata(
-    numeric_features, categorical_features, output_dir,
-    residual_quantiles=None,
-):
+    numeric_features: List[str],
+    categorical_features: List[str],
+    output_dir: Path,
+    residual_quantiles: Optional[dict] = None,
+) -> None:
     metadata = {
         'numeric_features': numeric_features,
         'categorical_features': categorical_features,
@@ -342,7 +360,11 @@ def load_feature_metadata(artifact_dir):
     return joblib.load(artifact_dir / 'feature_metadata.pkl')
 
 
-def prepare_features_for_model(df, feature_columns, target_column='delay_minutes'):
+def prepare_features_for_model(
+    df: pd.DataFrame,
+    feature_columns: List[str],
+    target_column: str = 'delay_minutes',
+) -> Tuple[pd.DataFrame, pd.Series]:
     """Prepare X/y matrices, filling NaNs with safe defaults."""
     df_clean = df.dropna(subset=[target_column]).copy()
 

@@ -7,6 +7,32 @@ import numpy as np
 from config import get_config
 
 
+@pytest.fixture()
+def tiny_multiline_df() -> pd.DataFrame:
+    """Minimal multi-line DataFrame (20 timestamps × 11 lines) for fast tests."""
+    lines = [
+        'Bakerloo', 'Central', 'Circle', 'District',
+        'Hammersmith & City', 'Jubilee', 'Metropolitan',
+        'Northern', 'Piccadilly', 'Victoria', 'Waterloo & City',
+    ]
+    rng = np.random.RandomState(0)
+    timestamps = pd.date_range('2024-01-01', periods=20, freq='1h')
+    records = []
+    for ts in timestamps:
+        for line in lines:
+            delay = float(rng.uniform(0, 15))
+            records.append({
+                'timestamp': ts, 'line': line,
+                'status': 'Good Service' if delay < 3 else ('Minor Delays' if delay < 10 else 'Severe Delays'),
+                'delay_minutes': round(delay, 2),
+                'temp_c': 12.0, 'precipitation_mm': 0.0, 'humidity': 70.0,
+                'crowding_index': 0.5, 'is_weekend': 0,
+                'hour': ts.hour, 'day_of_week': ts.dayofweek,
+                'month': ts.month, 'peak_time': 0, 'is_holiday': 0,
+            })
+    return pd.DataFrame(records)
+
+
 @pytest.fixture(scope='session')
 def config():
     return get_config()

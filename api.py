@@ -2,28 +2,100 @@
 FastAPI service for delay predictions.
 
     uvicorn api:app --reload --port 8000
+
+Environment variables:
+    ALLOWED_ORIGINS  Comma-separated list of allowed CORS origins.
+                     Defaults to "" (wildcard, no credentials).
+                     Set to e.g. "http://localhost:3000,https://yourdomain.com"
+                     to restrict access and enable credentials.
 """
 
+import os
+import time
+import threading
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 from datetime import datetime
-from typing import Optional, List, Dict
+from typing import Optional, List
 from pathlib import Path
 import logging
 
+from config import DataConfig
 from future_prediction import FutureDelayPredictor
+from exceptions import ModelNotLoadedError
+
+_DATA_CONFIG = DataConfig()
 
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# simple in-memory rate limiter (no extra dependencies)
+# ---------------------------------------------------------------------------
+
+class _RateLimiter:
+    """Token-bucket rate limiter keyed by client IP."""
+
+    def __init__(self, max_calls: int, window_seconds: int):
+        self._max = max_calls
+        self._window = window_seconds
+        self._buckets: dict = {}  # plain dict — only populated on first request per key
+        self._lock = threading.Lock()
+
+    def is_allowed(self, key: str) -> bool:
+        now = time.time()
+        with self._lock:
+            # evict timestamps older than the window; delete key when bucket empties
+            calls = [t for t in self._buckets.get(key, []) if now - t < self._window]
+            if len(calls) >= self._max:
+                self._buckets[key] = calls
+                return False
+            calls.append(now)
+            self._buckets[key] = calls
+            return True
+
+
+_limiter = _RateLimiter(max_calls=60, window_seconds=60)  # 60 req/min per IP
+
+
+# ---------------------------------------------------------------------------
+# CORS — read allowed origins from environment so the default (wildcard) is
+# safe for demos while production can lock it down without code changes.
+# ---------------------------------------------------------------------------
+
+_cors_origins_env = os.getenv("ALLOWED_ORIGINS", "").strip()
+if _cors_origins_env:
+    _cors_origins = [o.strip() for o in _cors_origins_env.split(",") if o.strip()]
+    _allow_credentials = True   # safe because origins are explicit
+else:
+    _cors_origins = ["*"]
+    _allow_credentials = False  # credentials + wildcard is forbidden by spec
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Load model once at startup."""
+    """Load model once at startup.
+
+    If no artifacts exist (pre-training), starts without a model — the health
+    endpoint will report 'unhealthy' and /predict will return 503.
+
+    If artifacts exist but fail to load, logs a critical error and starts in a
+    degraded state rather than crashing.  This avoids crash-loop backoffs in
+    container orchestrators (e.g. Kubernetes) while giving ops teams time to
+    inspect the corrupted artifact.  /health will still report 'unhealthy'.
+    """
     app.state.predictor = None
     app.state.active_run_id = None
-    await _load_model(app)
+    try:
+        await _load_model(app)
+    except RuntimeError as exc:
+        # Degraded start — log loudly but don't crash the process.
+        logger.critical(
+            f"Model failed to load at startup — serving in degraded mode: {exc}"
+        )
     yield
 
 
@@ -36,11 +108,22 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],        # wide open for demo
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_credentials=_allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    client_ip = request.client.host if request.client else "unknown"
+    if not _limiter.is_allowed(client_ip):
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Too many requests — limit is 60/minute per IP"},
+        )
+    return await call_next(request)
 
 
 def _resolve_latest_run_id(artifacts_dir: Path) -> Optional[str]:
@@ -52,18 +135,26 @@ def _resolve_latest_run_id(artifacts_dir: Path) -> Optional[str]:
     return run_dirs[-1] if run_dirs else None
 
 
-# ---- request / response models ----
+# ---------------------------------------------------------------------------
+# request / response models
+# ---------------------------------------------------------------------------
+
+class WeatherForecast(BaseModel):
+    """Typed weather payload — prevents silent key-name mismatches."""
+    temperature: float = Field(12.0, ge=-30.0, le=50.0, description="Temperature in °C")
+    precipitation: float = Field(0.0, ge=0.0, le=200.0, description="Precipitation in mm")
+    humidity: float = Field(70.0, ge=0.0, le=100.0, description="Relative humidity 0–100")
+
 
 class PredictionRequest(BaseModel):
     line: str = Field(..., description="Tube line name")
     datetime: str = Field(..., description="Target datetime (ISO 8601)")
-    weather_forecast: Optional[Dict] = Field(None, description="Optional weather data")
+    weather_forecast: Optional[WeatherForecast] = Field(None, description="Optional weather data")
 
     @field_validator('line')
     @classmethod
     def validate_line(cls, v):
-        from config import DataConfig
-        valid_lines = DataConfig().tube_lines
+        valid_lines = _DATA_CONFIG.tube_lines
         if v not in valid_lines:
             raise ValueError(f"Invalid line. Must be one of: {', '.join(valid_lines)}")
         return v
@@ -74,8 +165,8 @@ class PredictionRequest(BaseModel):
         try:
             dt = datetime.fromisoformat(v.replace('Z', '+00:00'))
             dt_naive = dt.replace(tzinfo=None)
-            if dt_naive <= datetime.now():
-                raise ValueError("Datetime must be in the future")
+            if dt_naive < datetime.now():
+                raise ValueError("Datetime must be in the future (or present)")
             return v
         except ValueError as exc:
             raise ValueError(f"Invalid datetime format. Use ISO 8601: {exc}") from exc
@@ -102,35 +193,43 @@ class HealthResponse(BaseModel):
     timestamp: str
 
 
-# ---- model loading ----
+# ---------------------------------------------------------------------------
+# model loading
+# ---------------------------------------------------------------------------
 
 async def _load_model(app: FastAPI):
+    """Load model from the latest run directory.
+
+    If no artifacts exist yet (pre-training), logs a warning and leaves
+    predictor as None — the health endpoint will report 'unhealthy'.
+
+    If artifacts exist but the model fails to load, raises RuntimeError so
+    the application fails fast rather than silently serving 503 forever.
+    """
+    artifacts_root = Path("artifacts")
+    run_id = _resolve_latest_run_id(artifacts_root)
+
+    if run_id is None:
+        logger.warning("No run_* directories under artifacts/ — starting without model")
+        return  # Acceptable: training hasn't run yet
+
+    # Artifacts exist — any failure from here is a hard error
+    artifacts_dir = artifacts_root / run_id
     try:
-        artifacts_root = Path("artifacts")
-        run_id = _resolve_latest_run_id(artifacts_root)
-
-        if run_id is None:
-            logger.error("No run_* directories under artifacts/ — can't load model")
-            return
-
-        artifacts_dir = artifacts_root / run_id
-
         app.state.predictor = FutureDelayPredictor(
             model_path=str(artifacts_dir / "best_model.pkl"),
             feature_metadata_path=str(artifacts_dir / "feature_metadata.pkl")
         )
         app.state.active_run_id = run_id
-
-        logger.info("Model loaded from %s", artifacts_dir)
-
-    except Exception as e:
-        logger.error("Failed to load model: %s", e)
-        import traceback
-        traceback.print_exc()
-        app.state.predictor = None
+        logger.info(f"Model loaded from {artifacts_dir}")
+    except Exception as exc:
+        logger.critical(f"Failed to load model from {artifacts_dir}: {exc}", exc_info=True)
+        raise RuntimeError(f"Model loading failed: {exc}") from exc
 
 
-# ---- endpoints ----
+# ---------------------------------------------------------------------------
+# endpoints
+# ---------------------------------------------------------------------------
 
 @app.get("/", tags=["Info"])
 async def root():
@@ -169,7 +268,9 @@ def _make_prediction_response(predictor, active_run_id, body):
     prediction = predictor.predict_delay(
         line=body.line,
         target_datetime=target_dt,
-        weather_forecast=body.weather_forecast,
+        # Convert Pydantic model → plain dict so future_prediction.py
+        # can use .get() without caring about the API model type.
+        weather_forecast=body.weather_forecast.model_dump() if body.weather_forecast else None,
     )
 
     emoji_map = {
@@ -202,7 +303,7 @@ async def predict_delay(body: PredictionRequest, http_request: Request):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.error("Prediction error: %s", e)
+        logger.error(f"Prediction error: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -265,14 +366,13 @@ async def predict_forecast(http_request: Request, line: str,
             "model_version": http_request.app.state.active_run_id or "unknown",
         }
     except Exception as e:
-        logger.error("Forecast error: %s", e)
+        logger.error(f"Forecast error: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/lines", tags=["Info"])
 async def get_lines():
-    from config import DataConfig
-    return {"lines": DataConfig().tube_lines}
+    return {"lines": _DATA_CONFIG.tube_lines}
 
 
 if __name__ == "__main__":

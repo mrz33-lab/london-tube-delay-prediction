@@ -12,17 +12,11 @@ import holidays
 
 from config import Config, RANDOM_SEED
 from utils import validate_datetime_column, set_random_seeds
+from exceptions import SchemaValidationError
+from line_metadata import LINE_BASE_DELAYS
 
 
 logger = logging.getLogger(__name__)
-
-# baseline delays per line — roughly matches TfL published averages
-LINE_BASE_DELAYS = {
-    'Central': 3.0, 'Jubilee': 2.5, 'Northern': 3.5,
-    'Victoria': 2.0, 'Piccadilly': 2.8, 'Bakerloo': 3.2,
-    'District': 3.8, 'Circle': 4.0, 'Metropolitan': 2.5,
-    'Hammersmith & City': 3.5, 'Waterloo & City': 1.5,
-}
 
 
 def load_data(config: Config) -> Tuple[pd.DataFrame, str]:
@@ -56,38 +50,40 @@ def validate_schema(df: pd.DataFrame, config: Config):
 
     missing_cols = required_cols - actual_cols
     if missing_cols:
-        raise ValueError(f"Missing required columns: {missing_cols}")
+        raise SchemaValidationError(f"Missing required columns: {missing_cols}")
 
     if not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
-        raise ValueError("'timestamp' must be datetime type")
+        raise SchemaValidationError("'timestamp' must be datetime type")
 
     if not pd.api.types.is_numeric_dtype(df['delay_minutes']):
-        raise ValueError("'delay_minutes' must be numeric")
+        raise SchemaValidationError("'delay_minutes' must be numeric")
 
     if df['delay_minutes'].min() < config.data.delay_min:
-        raise ValueError(f"delay_minutes has values below minimum {config.data.delay_min}")
+        raise SchemaValidationError(f"delay_minutes has values below minimum {config.data.delay_min}")
 
     invalid_lines = set(df['line'].unique()) - set(config.data.tube_lines)
     if invalid_lines:
-        raise ValueError(f"Invalid tube lines found: {invalid_lines}")
+        raise SchemaValidationError(f"Invalid tube lines found: {invalid_lines}")
 
     invalid_status = set(df['status'].unique()) - set(config.data.status_categories)
     if invalid_status:
-        raise ValueError(f"Invalid status values found: {invalid_status}")
+        raise SchemaValidationError(f"Invalid status values found: {invalid_status}")
 
     # warn rather than error for temperature — extreme values do happen
     if df['temp_c'].min() < config.data.temp_min or df['temp_c'].max() > config.data.temp_max:
         logger.warning(f"Temperature outside expected range [{config.data.temp_min}, {config.data.temp_max}]")
 
     if df['crowding_index'].min() < config.data.crowding_min or df['crowding_index'].max() > config.data.crowding_max:
-        raise ValueError(f"crowding_index must be in [{config.data.crowding_min}, {config.data.crowding_max}]")
+        raise SchemaValidationError(f"crowding_index must be in [{config.data.crowding_min}, {config.data.crowding_max}]")
 
     logger.info("Schema validation passed")
 
 
 def generate_synthetic_data(config: Config) -> pd.DataFrame:
     """Generate realistic-ish synthetic delay data for prototyping."""
-    set_random_seeds(RANDOM_SEED)
+    # Use an explicit RandomState so results are reproducible regardless of
+    # any other code that may call np.random before this function runs.
+    rng = np.random.RandomState(RANDOM_SEED)
     logger.info("Generating synthetic data...")
 
     start_date = datetime.now() - timedelta(days=config.data.synthetic_n_days)
@@ -111,12 +107,12 @@ def generate_synthetic_data(config: Config) -> pd.DataFrame:
 
         # seasonal temperature cycle
         base_temp = 15 + 10 * np.sin(2 * np.pi * (month - 3) / 12)
-        temp_c = base_temp + np.random.normal(0, 3)
+        temp_c = base_temp + rng.normal(0, 3)
 
         rain_probability = 0.3 if month in [11, 12, 1, 2] else 0.15
-        precipitation_mm = np.random.exponential(5) if np.random.random() < rain_probability else 0
+        precipitation_mm = rng.exponential(5) if rng.random() < rain_probability else 0
 
-        humidity = np.clip(60 + np.random.normal(0, 15) + precipitation_mm, 30, 100)
+        humidity = np.clip(60 + rng.normal(0, 15) + precipitation_mm, 30, 100)
 
         for line in config.data.tube_lines:
             line_base_delay = LINE_BASE_DELAYS.get(line, 3.0)
@@ -129,26 +125,26 @@ def generate_synthetic_data(config: Config) -> pd.DataFrame:
             if line in ['Central', 'Northern', 'Victoria', 'Jubilee']:
                 base_crowding += 0.1  # busier lines
 
-            crowding_index = np.clip(base_crowding + np.random.normal(0, 0.1), 0, 1)
+            crowding_index = np.clip(base_crowding + rng.normal(0, 0.1), 0, 1)
 
             delay = line_base_delay
             if peak_time:
-                delay += np.random.uniform(2, 5)
+                delay += rng.uniform(2, 5)
             if precipitation_mm > 10:
-                delay += np.random.uniform(3, 8)
+                delay += rng.uniform(3, 8)
             elif precipitation_mm > 0:
-                delay += np.random.uniform(0.5, 2)
+                delay += rng.uniform(0.5, 2)
             if temp_c < 0 or temp_c > 30:
-                delay += np.random.uniform(1, 4)
+                delay += rng.uniform(1, 4)
 
-            delay += crowding_index * np.random.uniform(1, 3)
+            delay += crowding_index * rng.uniform(1, 3)
 
             if is_weekend and not is_holiday:
                 delay *= 0.7
             if is_holiday:
                 delay *= 0.5
 
-            delay += np.random.exponential(1.5)
+            delay += rng.exponential(1.5)
             delay = max(0, delay)
 
             # assign status from delay thresholds
@@ -160,8 +156,8 @@ def generate_synthetic_data(config: Config) -> pd.DataFrame:
                 status = 'Severe Delays'
 
             # rare spike events (~2% chance) — signal failures etc
-            if np.random.random() < 0.02:
-                delay += np.random.uniform(15, 45)
+            if rng.random() < 0.02:
+                delay += rng.uniform(15, 45)
                 status = 'Severe Delays'
 
             records.append({

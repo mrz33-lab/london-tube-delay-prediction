@@ -110,6 +110,22 @@ LINE_OFFPEAK_TPH: Dict[str, int] = {
     'Waterloo & City':      4,
 }
 
+# Baseline delay per line in minutes — roughly matches TfL published averages.
+# Moved here from data.py so all static per-line constants live in one place.
+LINE_BASE_DELAYS: Dict[str, float] = {
+    'Bakerloo':            3.2,
+    'Central':             3.0,
+    'Circle':              4.0,
+    'District':            3.8,
+    'Hammersmith & City':  3.5,
+    'Jubilee':             2.5,
+    'Metropolitan':        2.5,
+    'Northern':            3.5,
+    'Piccadilly':          2.8,
+    'Victoria':            2.0,
+    'Waterloo & City':     1.5,
+}
+
 
 def _validate_metadata_completeness():
     canonical = set(LINE_LENGTH_KM.keys())
@@ -120,6 +136,7 @@ def _validate_metadata_completeness():
         'LINE_ZONE_COVERAGE': LINE_ZONE_COVERAGE,
         'LINE_PEAK_TPH':      LINE_PEAK_TPH,
         'LINE_OFFPEAK_TPH':   LINE_OFFPEAK_TPH,
+        'LINE_BASE_DELAYS':   LINE_BASE_DELAYS,
     }
     for dict_name, d in all_dicts.items():
         missing = canonical - set(d.keys())
