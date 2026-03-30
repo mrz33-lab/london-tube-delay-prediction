@@ -550,3 +550,150 @@ def render_data_collection_tab(config, dark: bool) -> None:
         ```bash
         python scripts/check_collection_progress.py
         ```
+
+        **Data is stored at:** `data/tfl_merged.csv`
+
+        Collection requires:
+        - `TFL_APP_KEY` (optional but recommended for higher rate limits)
+        - `OPENWEATHERMAP_API_KEY` (required for weather data)
+
+        Store keys in `.env` file (see `.env.example`).
+        """)
+
+
+def render_about_tab(artifacts: Dict) -> None:
+    """
+    Render the About tab: a structured project overview covering methodology,
+    limitations, and technology stack aimed at a non-technical audience.
+    """
+    best = artifacts.get("best_model_name", "lightgbm").upper()
+    metrics = artifacts.get("metrics", {})
+    best_key = artifacts.get("best_model_name", "best")
+    mae  = metrics.get(best_key, {}).get("test_mae",  "—")
+    r2   = metrics.get(best_key, {}).get("test_r2",   "—")
+
+    st.markdown(f"""
+    <div style="background: linear-gradient(135deg, #003688 0%, #0098D4 100%);
+                border-radius: 14px; padding: 2rem; color: white; margin-bottom: 1.5rem;">
+        <h2 style="margin:0; font-weight:800;">🚇 London Underground Delay Predictor</h2>
+        <p style="margin:0.4rem 0 0; opacity:0.9;">
+            COMP1682 Final Year Project · University of Greenwich · 2026
+        </p>
+        <div style="margin-top:1rem; display:flex; gap:2rem; flex-wrap:wrap;">
+            <div><div style="font-size:0.75rem; opacity:0.8;">BEST MODEL</div>
+                 <div style="font-size:1.3rem; font-weight:700;">{best}</div></div>
+            <div><div style="font-size:0.75rem; opacity:0.8;">TEST MAE</div>
+                 <div style="font-size:1.3rem; font-weight:700;">
+                     {f"{mae:.2f} min" if isinstance(mae, float) else mae}</div></div>
+            <div><div style="font-size:0.75rem; opacity:0.8;">R² SCORE</div>
+                 <div style="font-size:1.3rem; font-weight:700;">
+                     {f"{r2:.3f}" if isinstance(r2, float) else r2}</div></div>
+            <div><div style="font-size:0.75rem; opacity:0.8;">LINES MODELLED</div>
+                 <div style="font-size:1.3rem; font-weight:700;">11</div></div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    tab_a, tab_b, tab_c, tab_d = st.tabs(["🎯 Project", "🔧 Methodology", "📦 Tech Stack", "⚠️ Ethics"])
+
+    with tab_a:
+        st.markdown("""
+        ### Purpose
+        I built this system to predict London Underground delay severity (in minutes)
+        using machine learning, helping transport planners anticipate disruptions
+        before they escalate.
+
+        ### Research Questions
+        1. Can ML models outperform a simple naive baseline for short-term delay prediction?
+        2. Which features (weather, temporal, crowding) are most predictive?
+        3. How does model performance vary across different tube lines?
+
+        ### Key Contributions
+        - **Rigorous temporal validation** — I use a strict chronological 80/20 train/test
+          split with no look-ahead, preventing data leakage.
+        - **Multi-model comparison** — Naive baseline vs Ridge regression vs LightGBM.
+        - **SHAP explainability** — Every prediction is backed by feature-attribution scores.
+        - **Real data collection** — A 2-week TfL + weather data pipeline I built from scratch.
+        - **This dashboard** — Interactive, production-quality interface for dissertation demo.
+        """)
+
+    with tab_b:
+        st.markdown("""
+        ### Data Sources
+        | Source | Content | Frequency |
+        |--------|---------|-----------| 
+        | TfL Unified API | Line status, disruptions | Every 15 min |
+        | OpenWeatherMap | Temperature, rain, humidity | Every 15 min |
+        | `holidays` library | UK bank holiday calendar | Static |
+
+        ### Feature Engineering
+        I apply the following transformations with leakage protection:
+        - **Lag features** — delay at t-1 h and t-3 h (per line)
+        - **Rolling statistics** — mean & std over 3 h and 12 h windows
+        - **Weather deltas** — rate of change in temperature and precipitation
+        - **Temporal one-hots** — hour, day-of-week, month, peak/off-peak flag
+        - **Crowding index** — proxy derived from known peak/off-peak patterns
+
+        ### Models
+        | Model | Description |
+        |-------|-------------|
+        | Naive | Persistence: last observed delay per line |
+        | Ridge | L2-regularised linear regression |
+        | LightGBM | Gradient-boosted trees with RandomisedSearchCV tuning |
+
+        ### Evaluation
+        - Metric: **MAE** (primary), RMSE, R²
+        - Validation: 5-fold `TimeSeriesSplit` cross-validation
+        - Test: Held-out final 20% of chronological data
+        """)
+
+    with tab_c:
+        cols = st.columns(3)
+        techs = [
+            ("🐍 Python 3.x",       "Core language"),
+            ("🐼 pandas / numpy",   "Data wrangling"),
+            ("🤖 scikit-learn",     "Ridge, CV, preprocessing"),
+            ("⚡ LightGBM",         "Best model candidate"),
+            ("🧠 SHAP",             "Explainability"),
+            ("📊 Plotly",           "Interactive charts"),
+            ("🌐 Streamlit",        "This dashboard"),
+            ("⚡ FastAPI",          "Production REST API"),
+            ("🗓 holidays",         "UK calendar"),
+            ("☁️ OpenWeatherMap",   "Weather API"),
+            ("🚇 TfL API",          "Line status API"),
+            ("📦 joblib",           "Model serialisation"),
+        ]
+        for i, (name, desc) in enumerate(techs):
+            with cols[i % 3]:
+                st.markdown(f"""
+                <div style="background:#f8f9fa; border-radius:8px; padding:0.7rem 0.9rem; margin:0.3rem 0;">
+                    <div style="font-weight:700; font-size:0.9rem;">{name}</div>
+                    <div style="color:#6c757d; font-size:0.78rem;">{desc}</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+    with tab_d:
+        st.markdown("""
+        ### Ethical Considerations
+
+        **Privacy**
+        - I use zero personal passenger data. All metrics are fully aggregated at line level.
+
+        **Transparency**
+        - Every prediction is backed by SHAP feature attributions — no black-box decisions.
+        - My methodology is fully documented and reproducible via the public codebase.
+
+        **Limitations**
+        - Predictions are estimates, not guarantees. Major incidents (strikes, engineering
+          works) are not represented in training data and may degrade accuracy.
+        - Model performance varies by line; I recommend consulting per-line MAE before
+          operational use.
+
+        **Human Oversight**
+        - This system is designed as **decision support**, not automated action.
+          Human review is required before acting on any prediction.
+
+        **Data Quality**
+        - Synthetic data was used for initial development; real data collection
+          is ongoing. Dissertation results are clearly labelled by data source.
+        """)
