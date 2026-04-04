@@ -169,7 +169,7 @@ def train_lightgbm(X_train, y_train, X_test, y_test,
     ])
 
     tscv = TimeSeriesSplit(n_splits=config.models.cv_splits)
-    X_train_processed = preprocessor.fit_transform(X_train)
+    X_train_processed = np.asarray(preprocessor.fit_transform(X_train))
 
     def objective(trial):
         space = config.models.lightgbm_optuna_space
