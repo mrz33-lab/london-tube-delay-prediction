@@ -5,6 +5,7 @@ Generates global feature importance (beeswarm, bar) and local waterfall
 explanations from the trained model.
 """
 
+import hashlib
 import logging
 from pathlib import Path
 import time
@@ -63,6 +64,43 @@ def load_artifacts(artifact_dir: Path) -> dict:
     return artifacts
 
 
+def _shap_cache_key(artifact_dir: Path, X_test: pd.DataFrame) -> str:
+    """MD5 of (model file mtime, X_test data hash) — cheap to compute."""
+    model_path = artifact_dir / 'best_model.pkl'
+    mtime = str(model_path.stat().st_mtime) if model_path.exists() else 'missing'
+    data_hash = str(pd.util.hash_pandas_object(X_test).sum())
+    return hashlib.md5((mtime + data_hash).encode()).hexdigest()
+
+
+def load_shap_cache(artifact_dir: Path, X_test: pd.DataFrame):
+    """Return (shap_values, feature_names) from cache, or (None, None) on miss."""
+    cache_path = artifact_dir / 'shap_cache.pkl'
+    if not cache_path.exists():
+        return None, None
+    try:
+        cache = joblib.load(cache_path)
+        if cache.get('key') == _shap_cache_key(artifact_dir, X_test):
+            logger.info("SHAP cache hit — skipping recomputation")
+            return cache['shap_values'], cache['feature_names']
+        logger.info("SHAP cache key mismatch — recomputing")
+    except Exception as exc:
+        logger.warning("SHAP cache unreadable (%s) — recomputing", exc)
+    return None, None
+
+
+def save_shap_cache(artifact_dir: Path, X_test: pd.DataFrame,
+                    shap_values, feature_names) -> None:
+    """Persist SHAP values so the next explain run can skip recomputation."""
+    cache_path = artifact_dir / 'shap_cache.pkl'
+    joblib.dump(
+        {'key': _shap_cache_key(artifact_dir, X_test),
+         'shap_values': shap_values,
+         'feature_names': feature_names},
+        cache_path,
+    )
+    logger.info("Saved SHAP cache to %s", cache_path)
+
+
 def create_shap_explainer(model, X_background, config):
     """Create SHAP explainer, handling Pipeline vs raw estimator."""
     if not SHAP_AVAILABLE:
@@ -118,7 +156,11 @@ def compute_shap_values(explainer, model, X, config, max_samples=None):
             X_transformed = X_sample
 
         logger.info(f"Computing SHAP values for {len(X_sample)} samples...")
-        shap_values = explainer(X_transformed, check_additivity=False)
+        try:
+            shap_values = explainer(X_transformed, check_additivity=False)
+        except TypeError:
+            # LinearExplainer does not support check_additivity
+            shap_values = explainer(X_transformed)
         logger.info("SHAP values computed")
         return shap_values
 
@@ -234,27 +276,27 @@ def main():
     latest_run_id = get_latest_run_id(config.paths.artifacts_dir)
 
     if latest_run_id is None:
-        logger.error("No training runs found — run train.py first")
+        logging.getLogger(__name__).error("No training runs found — run train.py first")
         return
 
     artifact_dir = config.paths.artifacts_dir / latest_run_id
 
-    logger = setup_logging(config, latest_run_id)
-    logger.info("\n" + "=" * 80)
-    logger.info("Explainability Pipeline")
-    logger.info("=" * 80)
-    logger.info(f"Using artifacts from: {latest_run_id}")
+    run_logger = setup_logging(config, latest_run_id)
+    run_logger.info("\n" + "=" * 80)
+    run_logger.info("Explainability Pipeline")
+    run_logger.info("=" * 80)
+    run_logger.info(f"Using artifacts from: {latest_run_id}")
 
     set_random_seeds(RANDOM_SEED)
     start_time = time.time()
 
     try:
         # load artifacts
-        logger.info("\n--- Loading Artifacts ---")
+        run_logger.info("\n--- Loading Artifacts ---")
         artifacts = load_artifacts(artifact_dir)
 
         if 'best_model' not in artifacts:
-            logger.error("Best model not found in artifacts")
+            run_logger.error("Best model not found in artifacts")
             return
 
         best_model = artifacts['best_model']
@@ -264,33 +306,38 @@ def main():
         X_test = artifacts.get('X_test')
 
         if X_train is None or X_test is None:
-            logger.warning("X_train/X_test not found — re-run train.py")
+            run_logger.warning("X_train/X_test not found — re-run train.py")
             return
 
         if not SHAP_AVAILABLE:
-            logger.error("SHAP not installed — pip install shap")
+            run_logger.error("SHAP not installed — pip install shap")
             with open(artifact_dir / 'explanations.txt', 'w') as f:
                 f.write("SHAP not available\nInstall with: pip install shap\n")
             return
 
-        # compute SHAP values
-        logger.info("\n--- Computing SHAP Values ---")
-        explainer = create_shap_explainer(best_model, X_train, config)
-        shap_values = compute_shap_values(
-            explainer, best_model, X_test, config,
-            max_samples=config.explainability.shap_background_size
-        )
+        # compute SHAP values (or load from cache if model + data unchanged)
+        run_logger.info("\n--- Computing SHAP Values ---")
+        shap_values, feature_names = load_shap_cache(artifact_dir, X_test)
 
-        # get feature names from preprocessor
-        try:
-            preprocessor = best_model.named_steps.get('preprocessor')
-            feature_names = list(preprocessor.get_feature_names_out())
-        except Exception:
-            n_features = shap_values.values.shape[1] if shap_values is not None else len(X_test.columns)
-            feature_names = [f'feature_{i}' for i in range(n_features)]
+        if shap_values is None:
+            explainer = create_shap_explainer(best_model, X_train, config)
+            shap_values = compute_shap_values(
+                explainer, best_model, X_test, config,
+                max_samples=config.explainability.shap_background_size
+            )
+
+            # get feature names from preprocessor
+            try:
+                preprocessor = best_model.named_steps.get('preprocessor')
+                feature_names = list(preprocessor.get_feature_names_out())
+            except Exception:
+                n_features = shap_values.values.shape[1] if shap_values is not None else len(X_test.columns)
+                feature_names = [f'feature_{i}' for i in range(n_features)]
+
+            save_shap_cache(artifact_dir, X_test, shap_values, feature_names)
 
         # plots
-        logger.info("\n--- Creating Plots ---")
+        run_logger.info("\n--- Creating Plots ---")
         create_shap_plots(shap_values, feature_names, artifact_dir, config)
         create_feature_importance_plot(shap_values, feature_names, artifact_dir, config)
 
@@ -319,12 +366,12 @@ def main():
             f.write("  - explanations.txt\n")
 
         elapsed = time.time() - start_time
-        logger.info("\n" + "=" * 80)
-        logger.info("EXPLAINABILITY COMPLETE")
-        logger.info(f"Total time: {format_duration(elapsed)}")
+        run_logger.info("\n" + "=" * 80)
+        run_logger.info("EXPLAINABILITY COMPLETE")
+        run_logger.info(f"Total time: {format_duration(elapsed)}")
 
     except Exception as e:
-        logger.error(f"Explainability pipeline failed: {e}", exc_info=True)
+        run_logger.error(f"Explainability pipeline failed: {e}", exc_info=True)
         raise
 
 

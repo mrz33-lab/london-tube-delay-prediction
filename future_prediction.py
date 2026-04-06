@@ -13,7 +13,7 @@ import joblib
 import logging
 import holidays
 
-from config import Config, get_config
+from config import get_config
 from features import (
     add_special_event_features,
     add_topology_features,
@@ -28,19 +28,19 @@ class FutureDelayPredictor:
     """Wraps trained model with feature engineering for real-time predictions."""
 
     def __init__(self, model_path: str, feature_metadata_path: str):
-        logger.info("Loading model from: %s", model_path)
+        logger.info(f"Loading model from: {model_path}")
         try:
             self.model = joblib.load(model_path)
             logger.info("Model loaded successfully")
         except Exception as exc:
-            logger.error("Failed to load model: %s", exc)
+            logger.error(f"Failed to load model: {exc}")
             raise
 
         try:
             self.feature_metadata = joblib.load(feature_metadata_path)
             logger.info("Feature metadata loaded")
         except Exception as exc:
-            logger.error("Failed to load feature metadata: %s", exc)
+            logger.error(f"Failed to load feature metadata: {exc}")
             raise
 
         self.uk_holidays = holidays.UK()
@@ -50,8 +50,15 @@ class FutureDelayPredictor:
     def predict_delay(self, line, target_datetime, weather_forecast=None,
                       recent_delays=None) -> Dict:
         """Predict delay for a single line at a future datetime."""
-        if target_datetime <= datetime.now():
-            raise ValueError("target_datetime must be in the future")
+        # Normalise to naive datetime before comparing so that tz-aware inputs
+        # don't raise TypeError against datetime.now() (which is always naive).
+        target_naive = (
+            target_datetime.replace(tzinfo=None)
+            if target_datetime.tzinfo is not None
+            else target_datetime
+        )
+        if target_naive < datetime.now():
+            raise ValueError("target_datetime must be in the future (or present)")
 
         if line not in self._get_valid_lines():
             raise ValueError(f"Invalid line: {line}")
@@ -66,7 +73,7 @@ class FutureDelayPredictor:
         try:
             prediction = float(self.model.predict(features)[0])
         except Exception as exc:
-            logger.error("Prediction error: %s", exc)
+            logger.error(f"Prediction error: {exc}")
             raise
 
         # build 95% CI from empirical residual quantiles (per-line if available)
@@ -76,8 +83,9 @@ class FutureDelayPredictor:
             lower_bound = max(0.0, prediction + line_q['q025'])
             upper_bound = prediction + line_q['q975']
         else:
-            # fallback for models trained before residual quantiles were added
-            prediction_std = 1.5
+            # Fallback for models trained before residual quantiles were added.
+            # ci_fallback_std is configurable via ExplainabilityConfig.
+            prediction_std = self._config.explainability.ci_fallback_std
             lower_bound = max(0.0, prediction - 1.96 * prediction_std)
             upper_bound = prediction + 1.96 * prediction_std
 
@@ -106,7 +114,7 @@ class FutureDelayPredictor:
                     'status': pred['status'],
                 })
             except Exception as exc:
-                logger.warning("Could not predict for %s: %s", target_time, exc)
+                logger.warning(f"Could not predict for {target_time}: {exc}")
 
         return pd.DataFrame(predictions)
 
@@ -192,10 +200,10 @@ class FutureDelayPredictor:
 
         missing = expected - actual
         if missing:
-            logger.warning("Missing features vs training: %s", missing)
+            logger.warning(f"Missing features vs training: {missing}")
 
     def _get_valid_lines(self):
-        return Config().data.tube_lines
+        return self._config.data.tube_lines
 
     def _get_status_label(self, delay_minutes):
         if delay_minutes < self._config.data.status_good_max:

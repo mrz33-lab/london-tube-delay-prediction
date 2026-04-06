@@ -16,28 +16,35 @@ from config import Config, RANDOM_SEED
 
 
 def setup_logging(config: Config, run_id: str) -> logging.Logger:
-    """Set up file + console logging for a training run."""
+    """Set up file + console logging for a training run.
+
+    Uses a named logger ('tube_delay.<run_id>') rather than the root logger so
+    that handlers set up by other modules (e.g. pytest's log capture) are not
+    accidentally cleared.
+    """
     artifact_dir = config.paths.artifacts_dir / run_id
     artifact_dir.mkdir(exist_ok=True, parents=True)
 
     log_file = artifact_dir / "run.log"
+    log_level = config.logging.get_log_level()
+    formatter = logging.Formatter(
+        config.logging.log_format, datefmt=config.logging.log_date_format
+    )
 
-    logger = logging.getLogger()
-    logger.setLevel(config.logging.get_log_level())
-    logger.handlers = []  # clear existing to avoid duplicates
+    # Named logger — isolated from root, no side effects on other modules.
+    logger = logging.getLogger(f"tube_delay.{run_id}")
+    logger.setLevel(log_level)
+    logger.handlers.clear()     # clear only THIS logger's handlers
+    logger.propagate = False    # don't double-log via the root logger
 
     file_handler = logging.FileHandler(log_file)
-    file_handler.setLevel(config.logging.get_log_level())
-    file_handler.setFormatter(logging.Formatter(
-        config.logging.log_format, datefmt=config.logging.log_date_format
-    ))
+    file_handler.setLevel(log_level)
+    file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
 
     console_handler = logging.StreamHandler()
-    console_handler.setLevel(config.logging.get_log_level())
-    console_handler.setFormatter(logging.Formatter(
-        config.logging.log_format, datefmt=config.logging.log_date_format
-    ))
+    console_handler.setLevel(log_level)
+    console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
 
     return logger
@@ -179,3 +186,34 @@ def safe_divide(numerator, denominator, default=0.0):
         return numerator / denominator
     except Exception:
         return default
+
+
+def evaluate_model(
+    model,
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    X_test: pd.DataFrame,
+    y_test: pd.Series,
+) -> Dict[str, float]:
+    """Compute MAE, RMSE, and R² on both the train and test splits.
+
+    Extracted from train.py so that every model function uses the same
+    metric computation logic — no more copy-paste drift between trainers.
+
+    Returns a dict with keys:
+        train_mae, train_rmse, train_r2,
+        test_mae,  test_rmse,  test_r2
+    """
+    from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+
+    y_pred_train = model.predict(X_train)
+    y_pred_test  = model.predict(X_test)
+
+    return {
+        'train_mae':  mean_absolute_error(y_train, y_pred_train),
+        'train_rmse': float(np.sqrt(mean_squared_error(y_train, y_pred_train))),
+        'train_r2':   r2_score(y_train, y_pred_train),
+        'test_mae':   mean_absolute_error(y_test, y_pred_test),
+        'test_rmse':  float(np.sqrt(mean_squared_error(y_test, y_pred_test))),
+        'test_r2':    r2_score(y_test, y_pred_test),
+    }
