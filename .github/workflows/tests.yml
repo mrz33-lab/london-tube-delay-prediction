@@ -2,9 +2,9 @@ name: Run Tests
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
   pull_request:
-    branches: [main]
+    branches: [main, master]
 
 jobs:
   test:
@@ -30,5 +30,32 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Lint with flake8
+        run: |
+          # stop the build on syntax errors or undefined names
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics \
+            --exclude=artifacts,data,analysis,app
+          # warn on style issues (non-blocking)
+          flake8 . --count --max-line-length=120 --statistics \
+            --exclude=artifacts,data,analysis,app --exit-zero
+
+      - name: Type-check with mypy
+        run: |
+          mypy config.py features.py utils.py train.py api.py future_prediction.py data.py \
+            --ignore-missing-imports --no-strict-optional
+        continue-on-error: true
+
       - name: Run pytest with coverage
-        run: pytest tests/ -v --tb=short --cov=app --cov=features --cov=utils --cov-report=term-missing
+        run: |
+          pytest tests/ -v --tb=short \
+            --cov=features \
+            --cov=utils \
+            --cov=train \
+            --cov=data \
+            --cov=api \
+            --cov=explain \
+            --cov=future_prediction \
+            --cov=config \
+            --cov=exceptions \
+            --cov-report=term-missing \
+            --cov-fail-under=85

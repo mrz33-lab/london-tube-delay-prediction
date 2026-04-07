@@ -1,5 +1,4 @@
 """
-"""
 Ablation study to measure each feature group's contribution to
 LightGBM performance.
 
