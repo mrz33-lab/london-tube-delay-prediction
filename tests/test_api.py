@@ -163,5 +163,233 @@ def test_resolve_latest_run_id_empty(tmp_path):
     assert _resolve_latest_run_id(tmp_path) is None
 
 
+def test_forecast_endpoint_returns_forecast(client):
+    response = client.post("/predict/forecast?line=Central&hours_ahead=4&interval_minutes=60")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["line"] == "Central"
+    assert "forecast" in data
+    assert len(data["forecast"]) == 4
+    assert data["interval_minutes"] == 60
+
+
+def test_forecast_endpoint_no_model(client_no_model):
+    response = client_no_model.post("/predict/forecast?line=Central")
+    assert response.status_code == 503
+
+
+def test_forecast_endpoint_exceeds_horizon(client):
+    response = client.post("/predict/forecast?line=Central&hours_ahead=200")
+    assert response.status_code == 400
+
+
+def test_predict_batch_no_model(client_no_model):
+    response = client_no_model.post("/predict/batch", json={
+        "predictions": [{"line": "Central", "datetime": "2027-06-01T09:00:00"}]
+    })
+    assert response.status_code == 503
+
+
+def test_predict_with_weather_forecast(client):
+    response = client.post("/predict", json={
+        "line": "Central",
+        "datetime": "2027-06-01T09:00:00",
+        "weather_forecast": {"temperature": 20.0, "precipitation": 5.0, "humidity": 65.0},
+    })
+    assert response.status_code == 200
+
+
+def test_predict_value_error_returns_400(client):
+    import api
+    from fastapi.testclient import TestClient as _TC
+    mock_predictor = _make_mock_predictor()
+    mock_predictor.predict_delay.side_effect = ValueError("bad input")
+
+    async def _load_with_error(app):
+        app.state.predictor = mock_predictor
+        app.state.active_run_id = 'run_test'
+
+    with patch.object(api, '_load_model', _load_with_error):
+        with _TC(api.app) as c:
+            response = c.post("/predict", json={
+                "line": "Central",
+                "datetime": "2027-06-01T09:00:00",
+            })
+    assert response.status_code == 400
+
+
+def test_rate_limiter_allows_and_blocks():
+    from api import _RateLimiter
+    limiter = _RateLimiter(max_calls=3, window_seconds=60)
+    assert limiter.is_allowed("test_ip") is True
+    assert limiter.is_allowed("test_ip") is True
+    assert limiter.is_allowed("test_ip") is True
+    # 4th call within window should be blocked
+    assert limiter.is_allowed("test_ip") is False
+
+
+def test_rate_limiter_different_ips_are_independent():
+    from api import _RateLimiter
+    limiter = _RateLimiter(max_calls=1, window_seconds=60)
+    assert limiter.is_allowed("ip_a") is True
+    assert limiter.is_allowed("ip_b") is True
+    assert limiter.is_allowed("ip_a") is False
+
+
+def test_rate_limit_middleware_returns_429(client):
+    import api
+    with patch.object(api._limiter, 'is_allowed', return_value=False):
+        response = client.get("/health")
+    assert response.status_code == 429
+
+
+def test_predict_general_exception_returns_500(client):
+    import api
+    from fastapi.testclient import TestClient as _TC
+    mock_predictor = _make_mock_predictor()
+    mock_predictor.predict_delay.side_effect = RuntimeError("unexpected crash")
+
+    async def _setup(app):
+        app.state.predictor = mock_predictor
+        app.state.active_run_id = 'run_test'
+
+    with patch.object(api, '_load_model', _setup):
+        with _TC(api.app) as c:
+            response = c.post("/predict", json={
+                "line": "Central",
+                "datetime": "2027-06-01T09:00:00",
+            })
+    assert response.status_code == 500
+
+
+def test_batch_predict_partial_error(client):
+    import api
+    mock_predictor = _make_mock_predictor()
+    call_count = [0]
+
+    def _side_effect(*args, **kwargs):
+        call_count[0] += 1
+        if call_count[0] == 2:
+            raise RuntimeError("second prediction failed")
+        return _make_mock_predictor().predict_delay.return_value
+
+    mock_predictor.predict_delay.side_effect = _side_effect
+
+    async def _setup(app):
+        app.state.predictor = mock_predictor
+        app.state.active_run_id = 'run_test'
+
+    from fastapi.testclient import TestClient as _TC
+    with patch.object(api, '_load_model', _setup):
+        with _TC(api.app) as c:
+            response = c.post("/predict/batch", json={
+                "predictions": [
+                    {"line": "Central", "datetime": "2027-06-01T09:00:00"},
+                    {"line": "Jubilee", "datetime": "2027-06-01T09:00:00"},
+                ]
+            })
+    assert response.status_code == 200
+    data = response.json()
+    assert data["successful"] == 1
+    assert data["failed"] == 1
+
+
+def test_forecast_exception_returns_500(client):
+    import api
+    from fastapi.testclient import TestClient as _TC
+    mock_predictor = _make_mock_predictor()
+    mock_predictor.predict_next_24_hours.side_effect = RuntimeError("forecast failed")
+
+    async def _setup(app):
+        app.state.predictor = mock_predictor
+        app.state.active_run_id = 'run_test'
+
+    with patch.object(api, '_load_model', _setup):
+        with _TC(api.app) as c:
+            response = c.post("/predict/forecast?line=Central")
+    assert response.status_code == 500
+
+
+def test_load_model_no_run_dirs():
+    """Covers _load_model() early-return when no artifacts exist."""
+    import asyncio
+    import api
+    from fastapi import FastAPI
+    app_obj = FastAPI()
+    app_obj.state.predictor = None
+
+    with patch.object(api, '_resolve_latest_run_id', return_value=None):
+        asyncio.run(api._load_model(app_obj))
+
+    assert app_obj.state.predictor is None
+
+
+def test_load_model_raises_on_failed_predictor():
+    """Covers _load_model() RuntimeError path when model file is missing."""
+    import asyncio
+    import api
+    from fastapi import FastAPI
+    app_obj = FastAPI()
+    app_obj.state.predictor = None
+    app_obj.state.active_run_id = None
+
+    with patch.object(api, '_resolve_latest_run_id', return_value='run_test'):
+        with patch('api.FutureDelayPredictor', side_effect=FileNotFoundError("no model")):
+            with pytest.raises(RuntimeError, match="Model loading failed"):
+                asyncio.run(api._load_model(app_obj))
+
+
+def test_load_model_success():
+    """Covers the happy path of _load_model()."""
+    import asyncio
+    import api
+    from fastapi import FastAPI
+    app_obj = FastAPI()
+    app_obj.state.predictor = None
+    app_obj.state.active_run_id = None
+
+    mock_predictor = _make_mock_predictor()
+
+    with patch.object(api, '_resolve_latest_run_id', return_value='run_20260101_000000'):
+        with patch('api.FutureDelayPredictor', return_value=mock_predictor):
+            asyncio.run(api._load_model(app_obj))
+
+    assert app_obj.state.predictor is mock_predictor
+    assert app_obj.state.active_run_id == 'run_20260101_000000'
+
+
+def test_lifespan_degraded_on_runtime_error():
+    """Covers the graceful degraded-mode startup in lifespan.
+
+    When model artifacts exist but fail to load, the API should start up
+    without crashing (no exception propagated) and serve 503 on /predict.
+    The /health endpoint should report 'unhealthy'.
+
+    This replaces the previous test that expected a raise, because
+    Improvement #5 intentionally changed the behaviour: the app now logs
+    a CRITICAL message and stays alive rather than crash-looping.
+    """
+    import api
+    from fastapi.testclient import TestClient as _TC
+
+    async def _fails(app):
+        raise RuntimeError("hard failure")
+
+    # The app should start without raising despite the load failure
+    with patch.object(api, '_load_model', _fails):
+        with _TC(api.app) as c:
+            # predictor is None, so /predict must return 503
+            response = c.post("/predict", json={
+                "line": "Central",
+                "datetime": "2027-06-01T09:00:00",
+            })
+            assert response.status_code == 503
+
+            # health endpoint must report 'unhealthy'
+            health = c.get("/health")
+            assert health.status_code == 200
+            assert health.json()["status"] == "unhealthy"
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

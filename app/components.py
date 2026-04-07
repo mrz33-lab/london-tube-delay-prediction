@@ -13,18 +13,15 @@ from utils import get_latest_run_id
 def render_header() -> None:
     """
     Render the hero header with TfL roundel branding and a live timestamp.
-    The layout is kept compact to maximise vertical space for content.
     """
     now_str = datetime.now().strftime("%A %d %B %Y  ·  %H:%M")
     st.markdown(f"""
     <div class="hero-card fade-in">
-        <div style="display:flex; align-items:center; gap:1rem;">
-            <div style="font-size:3rem; line-height:1;">🚇</div>
+        <div style="display:flex; align-items:center; gap:1.2rem; position:relative; z-index:1;">
+            <div style="font-size:3.2rem; line-height:1; filter:drop-shadow(0 4px 12px rgba(0,0,0,0.3));">🚇</div>
             <div>
                 <p class="hero-title">London Underground Delay Predictor</p>
-                <p class="hero-subtitle">
-                    ML-Powered Disruption Intelligence  ·  {now_str}
-                </p>
+                <p class="hero-subtitle">ML-Powered Disruption Intelligence &nbsp;·&nbsp; {now_str}</p>
             </div>
         </div>
     </div>
@@ -34,27 +31,27 @@ def render_header() -> None:
 def render_sidebar(artifacts: Dict, config) -> Tuple[str, str, str, Optional[Tuple]]:
     """
     Build the sidebar controls: model selector, line filter, date range picker,
-    and dark mode toggle.  User selections are returned as a tuple for clean
-    propagation to each tab renderer.
+    and dark mode toggle. User selections are returned as a tuple.
     """
     st.sidebar.markdown("""
     <div style="text-align:center; padding: 0.5rem 0 1.2rem;">
-        <span style="font-size:2rem;">🚇</span><br>
-        <span style="font-size:1.1rem; font-weight:700; color:white; letter-spacing:0.03em;">TfL ML Dashboard</span><br>
-        <span style="font-size:0.75rem; color:#b8ccff;">COMP1682 Dissertation</span>
+        <span style="font-size:1.8rem;">🚇</span><br>
+        <span style="font-size:1.05rem; font-weight:700; color:white; letter-spacing:0.02em;">TfL ML Dashboard</span><br>
+        <span style="font-size:0.72rem; color:#a8c4f0;">COMP1682 Dissertation</span>
     </div>
     """, unsafe_allow_html=True)
 
     st.sidebar.markdown("---")
 
-    # Dark mode
-    dark_mode = st.sidebar.toggle("🌙 Dark Mode", value=st.session_state.get("dark_mode", False))
+    dark_mode = st.sidebar.toggle("Dark Mode", value=st.session_state.get("dark_mode", False))
     st.session_state["dark_mode"] = dark_mode
 
     st.sidebar.markdown("---")
-    st.sidebar.markdown("**🔧 CONTROLS**")
+    st.sidebar.markdown(
+        "<span style='font-size:0.72rem; font-weight:700; letter-spacing:0.08em; color:#a8c4f0;'>CONTROLS</span>",
+        unsafe_allow_html=True,
+    )
 
-    # Model selector
     model_choice = st.sidebar.selectbox(
         "Model",
         ["Best", "Ridge", "Naive"],
@@ -66,7 +63,6 @@ def render_sidebar(artifacts: Dict, config) -> Tuple[str, str, str, Optional[Tup
     pred_col_map = {"Naive": "pred_naive", "Ridge": "pred_ridge", "Best": "pred_best"}
     model_col = pred_col_map[model_choice]
 
-    # Line selector
     test_preds = artifacts.get("test_predictions")
     lines = sorted(test_preds["line"].unique()) if test_preds is not None else ALL_LINES
     default_line_idx = lines.index("Central") if "Central" in lines else 0
@@ -78,7 +74,6 @@ def render_sidebar(artifacts: Dict, config) -> Tuple[str, str, str, Optional[Tup
     )
     st.session_state["selected_line"] = selected_line
 
-    # Date range
     date_range = None
     if test_preds is not None:
         min_d = test_preds["timestamp"].min().date()
@@ -92,36 +87,36 @@ def render_sidebar(artifacts: Dict, config) -> Tuple[str, str, str, Optional[Tup
 
     st.sidebar.markdown("---")
 
-    # Run info
     latest_run = get_latest_run_id(config.paths.artifacts_dir)
     if latest_run:
         ts = latest_run.replace("run_", "")
         fmt = datetime.strptime(ts, "%Y%m%d_%H%M%S").strftime("%d %b %Y  %H:%M")
         st.sidebar.markdown(f"""
-        <div style="background:rgba(255,255,255,0.08); border-radius:8px; padding:0.8rem; font-size:0.78rem;">
-            <div style="color:#b8ccff; font-weight:700; margin-bottom:0.4rem;">LATEST RUN</div>
-            <div style="color:white;">{latest_run}</div>
-            <div style="color:#b8ccff; margin-top:0.2rem;">{fmt}</div>
+        <div style="background:rgba(255,255,255,0.08); border-radius:8px; padding:0.8rem; font-size:0.78rem; margin-bottom:0.6rem;">
+            <div style="color:#a8c4f0; font-weight:700; text-transform:uppercase; letter-spacing:0.06em; font-size:0.68rem; margin-bottom:0.4rem;">Latest Run</div>
+            <div style="color:white; font-family:monospace; font-size:0.8rem;">{latest_run}</div>
+            <div style="color:#a8c4f0; margin-top:0.2rem;">{fmt}</div>
         </div>
         """, unsafe_allow_html=True)
 
-    # Best model badge
     best_name = artifacts.get("best_model_name", "lightgbm").upper()
     st.sidebar.markdown(f"""
-    <div style="background:rgba(0,177,64,0.2); border:1px solid #00B140;
-                border-radius:8px; padding:0.8rem; margin-top:0.6rem; font-size:0.78rem;">
-        <div style="color:#b8ccff; font-weight:700; margin-bottom:0.3rem;">BEST MODEL</div>
-        <div style="color:#00B140; font-weight:800; font-size:1rem;">✨ {best_name}</div>
+    <div style="background:rgba(0,177,64,0.15); border:1px solid rgba(0,177,64,0.4);
+                border-radius:8px; padding:0.8rem; font-size:0.78rem;">
+        <div style="color:#a8c4f0; font-weight:700; text-transform:uppercase; letter-spacing:0.06em; font-size:0.68rem; margin-bottom:0.3rem;">Best Model</div>
+        <div style="color:#00d46a; font-weight:800; font-size:1rem;">{best_name}</div>
     </div>
     """, unsafe_allow_html=True)
 
-    # Download
     if test_preds is not None:
         st.sidebar.markdown("---")
-        st.sidebar.markdown("**📥 EXPORT**")
+        st.sidebar.markdown(
+            "<span style='font-size:0.72rem; font-weight:700; letter-spacing:0.08em; color:#a8c4f0;'>EXPORT</span>",
+            unsafe_allow_html=True,
+        )
         csv_bytes = test_preds.to_csv(index=False).encode()
         st.sidebar.download_button(
-            label="⬇ Download Predictions CSV",
+            label="Download Predictions CSV",
             data=csv_bytes,
             file_name=f"predictions_{selected_line}_{datetime.now().strftime('%Y%m%d')}.csv",
             mime="text/csv",

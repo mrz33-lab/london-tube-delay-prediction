@@ -270,8 +270,12 @@ def create_feature_importance_chart(feat_df: pd.DataFrame, dark: bool = False) -
     top = feat_df.sort_values("importance", ascending=False).head(12)
     top = top.sort_values("importance", ascending=True)
 
+    max_imp = top["importance"].max()
+    if pd.isna(max_imp) or max_imp == 0:
+        max_imp = 1.0
+
     colours = [
-        f"rgba(0,{int(54 + 180 * (v / top['importance'].max()))},136,0.85)"
+        f"rgba(0,{int(54 + 180 * ((0 if pd.isna(v) else v) / max_imp))},136,0.85)"
         for v in top["importance"]
     ]
 
@@ -510,124 +514,227 @@ def create_collection_progress_chart(status: Dict, dark: bool = False) -> go.Fig
     return fig
 
 
+def create_interactive_tube_map(
+    line_delays: "pd.DataFrame",
+    pred_column: str = "pred_best",
+) -> go.Figure:
+    """
+    Build a high-fidelity schematic London Underground map in TfL style.
+
+    Renders all 11 lines with accurate Beck-style topology, official TfL
+    colours, a delay colour overlay, interchange station markers, and a
+    hover-to-highlight interaction.
+
+    Parameters
+    ----------
+    line_delays : pd.DataFrame
+        Must contain columns: ``line`` (str), ``pred_best`` (float, minutes),
+        ``actual`` (float, minutes).
+    pred_column : str
+        Column name to use for the predicted delay values.
+
+    Returns
+    -------
+    go.Figure
+    """
+    from app.map_data import LINE_PATHS, INTERCHANGE_STATIONS
+
+    # ── TfL official line colours ──────────────────────────────────────────
+    TFL_COLOURS: Dict[str, str] = {
+        "Bakerloo":           "#B36305",
+        "Central":            "#E32017",
+        "Circle":             "#FFD300",
+        "District":           "#00782A",
+        "Hammersmith & City": "#F3A9BB",
+        "Jubilee":            "#A0A5A9",
+        "Metropolitan":       "#9B0056",
+        "Northern":           "#000000",
+        "Piccadilly":         "#003688",
+        "Victoria":           "#0098D4",
+        "Waterloo & City":    "#95CDBA",
+    }
+
+    # ── Delay → display colour ────────────────────────────────────────────
+    def _delay_colour(delay: float, base: str) -> str:
+        if delay < 2:
+            return base             # good service → official colour
+        elif delay < 5:
+            return "#FFD300"        # amber
+        elif delay < 10:
+            return "#FF6600"        # orange
+        else:
+            return "#DC143C"        # red
+
+    def _delay_status(delay: float) -> str:
+        if delay < 2:   return "Good Service"
+        if delay < 5:   return "Minor Delays"
+        if delay < 10:  return "Moderate Delays"
+        return "Severe Delays"
+
+    # Build a lookup: line → predicted delay (mean)
+    delay_map: Dict[str, float] = {}
+    if line_delays is not None and not line_delays.empty:
+        for _, row in line_delays.iterrows():
+            line_name = row.get("line", "")
+            delay_val = float(row.get(pred_column, 0.0) or 0.0)
+            delay_map[line_name] = delay_val
+
+    BG = "#0B0C0F"   # near-black TfL night aesthetic
+
+    fig = go.Figure()
+
+    all_line_names = list(LINE_PATHS.keys())
+
+    for line_name in all_line_names:
+        path = LINE_PATHS[line_name]
+        xs = [p[0] for p in path]
+        ys = [p[1] for p in path]
+
+        base_colour = TFL_COLOURS.get(line_name, "#888888")
+        delay = delay_map.get(line_name, 0.0)
+        line_colour = _delay_colour(delay, base_colour)
+        status = _delay_status(delay)
+
+        hover = (
+            f"<b>{line_name} Line</b><br>"
+            f"Status: <b>{status}</b><br>"
+            f"Predicted delay: {delay:.1f} min"
+        )
+
+        fig.add_trace(go.Scatter(
+            x=xs,
+            y=ys,
+            mode="lines",
+            name=line_name,
+            line=dict(color=line_colour, width=7),
+            opacity=1.0,
+            hovertemplate=hover + "<extra></extra>",
+            legendgroup=line_name,
+            showlegend=True,
+            customdata=[[line_name]] * len(xs),
+        ))
+
+    # ── Interchange station markers ────────────────────────────────────────
+    ix = [s[0] for s in INTERCHANGE_STATIONS]
+    iy = [s[1] for s in INTERCHANGE_STATIONS]
+    ilabels = [s[2] for s in INTERCHANGE_STATIONS]
+
+    fig.add_trace(go.Scatter(
+        x=ix,
+        y=iy,
+        mode="markers+text",
+        marker=dict(
+            size=9,
+            color="white",
+            line=dict(width=2, color="#333333"),
+            symbol="circle",
+        ),
+        text=ilabels,
+        textposition="top center",
+        textfont=dict(size=8, color="#cccccc", family="'Helvetica Neue', 'Arial', sans-serif"),
+        hoverinfo="text",
+        hovertext=ilabels,
+        showlegend=False,
+        name="Interchanges",
+    ))
+
+    # ── Layout ─────────────────────────────────────────────────────────────
+    # x: ~[-0.5, 21]  y: ~[0, 18] — let Plotly fill the container naturally
+    # (no forced 1:1 scaling — TfL map itself is ~2:1 wide/tall)
+    fig.update_layout(
+        paper_bgcolor=BG,
+        plot_bgcolor=BG,
+        font=dict(color="#e8edf5", family="'Helvetica Neue', 'Arial', sans-serif", size=11),
+        margin=dict(l=10, r=10, t=50, b=90),
+        height=680,
+        xaxis=dict(
+            showgrid=False,
+            zeroline=False,
+            showticklabels=False,
+            showline=False,
+            fixedrange=True,
+            range=[-2, 102],
+        ),
+        yaxis=dict(
+            showgrid=False,
+            zeroline=False,
+            showticklabels=False,
+            showline=False,
+            fixedrange=True,
+            range=[-2, 72],
+        ),
+        title=dict(
+            text="London Underground — Network Delay Status",
+            font=dict(size=15, color="#e8edf5", family="'Helvetica Neue', 'Arial', sans-serif"),
+            x=0.01,
+            y=0.98,
+        ),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=-0.12,
+            xanchor="center",
+            x=0.5,
+            font=dict(size=10, color="#cccccc"),
+            bgcolor="rgba(0,0,0,0)",
+            borderwidth=0,
+            traceorder="normal",
+            itemclick="toggleothers",
+            itemdoubleclick="toggleothers",
+        ),
+        hovermode="closest",
+        dragmode=False,
+        hoverlabel=dict(
+            bgcolor="#1c1f26",
+            bordercolor="#555",
+            font_color="#e8edf5",
+            font_size=13,
+        ),
+    )
+
+    return fig
+
+
 def create_network_map_figure(
     line_delays: Dict,
     dark: bool = False,
     highlighted_line: str = None,
 ) -> go.Figure:
     """
-    Build a schematic London Underground map using Plotly.
-
-    Each tube line is drawn as a coloured Scatter trace.
-    If *highlighted_line* is set, that line stays vivid while
-    all others fade to near-transparent.
+    Wrapper that adapts the legacy dict-based call signature used by tabs.py
+    into the new ``create_interactive_tube_map`` DataFrame interface.
 
     Parameters
     ----------
     line_delays : dict
-        Mapping of line name → avg delay (minutes) for the current snapshot.
+        Mapping of line name → avg delay (minutes).
     dark : bool
-        Dark-mode flag.
+        Unused (map now always uses the dark TfL night aesthetic).
     highlighted_line : str or None
-        If set, only this line is shown at full opacity.
+        If provided, all other lines are dimmed to 20 % opacity so the
+        selected line is clearly highlighted.
     """
-    from app.map_data import LINE_PATHS, INTERCHANGE_STATIONS
+    # Build a minimal DataFrame expected by create_interactive_tube_map
+    rows = []
+    for line_name, delay in line_delays.items():
+        rows.append({"line": line_name, "pred_best": delay, "actual": delay})
+    df = pd.DataFrame(rows) if rows else pd.DataFrame(columns=["line", "pred_best", "actual"])
 
-    paper_bg = "#0d1117" if dark else "#ffffff"
-    font_col = "#e6edf3" if dark else "#1a1a2e"
+    fig = create_interactive_tube_map(df, pred_column="pred_best")
 
-    fig = go.Figure()
-
-    for line_name, path in LINE_PATHS.items():
-        xs = [p[0] for p in path]
-        ys = [p[1] for p in path]
-        colour = LINE_COLOURS.get(line_name, "#003688")
-        delay  = line_delays.get(line_name, 0.0)
-
-        # Determine status label + colour
-        if delay < 2:
-            status_label, status_col = "Good Service", "#00B140"
-        elif delay < 5:
-            status_label, status_col = "Minor Delays", "#FFD300"
-        elif delay < 10:
-            status_label, status_col = "Moderate Delays", "#FF6600"
-        else:
-            status_label, status_col = "Severe Delays", "#DC241F"
-
-        # Opacity logic: dim non-highlighted lines
-        if highlighted_line and line_name != highlighted_line:
-            opacity = 0.12
-        else:
-            opacity = 1.0
-
-        hover_text = (
-            f"<b>{line_name}</b><br>"
-            f"Avg Delay: {delay:.1f} min<br>"
-            f"Status: {status_label}<br>"
-        )
-
-        fig.add_trace(go.Scatter(
-            x=xs, y=ys,
-            mode="lines+markers",
-            name=line_name,
-            line=dict(color=colour, width=5 if opacity == 1.0 else 3),
-            marker=dict(size=6, color=colour),
-            opacity=opacity,
-            hovertemplate=hover_text + "<extra></extra>",
-            legendgroup=line_name,
-            showlegend=True,
-        ))
-
-    # Interchange station labels
-    ix = [s[0] for s in INTERCHANGE_STATIONS]
-    iy = [s[1] for s in INTERCHANGE_STATIONS]
-    labels = [s[2] for s in INTERCHANGE_STATIONS]
-
-    fig.add_trace(go.Scatter(
-        x=ix, y=iy,
-        mode="markers+text",
-        marker=dict(
-            size=10, color="white" if dark else "white",
-            line=dict(width=2, color="#333333"),
-            symbol="circle",
-        ),
-        text=labels,
-        textposition="top center",
-        textfont=dict(size=8, color=font_col),
-        hoverinfo="text",
-        hovertext=labels,
-        showlegend=False,
-        name="Stations",
-    ))
-
-    fig.update_layout(
-        paper_bgcolor=paper_bg,
-        plot_bgcolor=paper_bg,
-        font=dict(color=font_col, family="'Segoe UI', sans-serif"),
-        margin=dict(l=10, r=10, t=40, b=10),
-        height=600,
-        xaxis=dict(
-            showgrid=False, zeroline=False, showticklabels=False,
-            fixedrange=True,
-        ),
-        yaxis=dict(
-            showgrid=False, zeroline=False, showticklabels=False,
-            scaleanchor="x", scaleratio=1, fixedrange=True,
-        ),
-        title=dict(
-            text="London Underground Network — Live Delay Status",
-            font=dict(size=16, color=font_col),
-            x=0.01,
-        ),
-        legend=dict(
-            orientation="h",
-            yanchor="top", y=-0.02,
-            xanchor="center", x=0.5,
-            font=dict(size=10),
-        ),
-        hovermode="closest",
-        dragmode=False,
-    )
+    # Apply highlighting: dim all other traces
+    if highlighted_line:
+        for trace in fig.data:
+            if trace.name != highlighted_line and trace.name != "Interchanges":
+                trace.update(
+                    opacity=0.20,
+                    line=dict(color="#555555", width=4),
+                )
+            elif trace.name == highlighted_line:
+                trace.update(
+                    opacity=1.0,
+                    line=dict(width=10),
+                )
 
     return fig
 
