@@ -1,0 +1,63 @@
+{
+  "run_id": "run_20260412_212949",
+  "windows": [
+    {
+      "window": "2026-04-04",
+      "window_start": "2026-04-04T12:43:00",
+      "n": 504,
+      "mae_best": 0.0573,
+      "mae_naive": 0.1567
+    },
+    {
+      "window": "2026-04-05",
+      "window_start": "2026-04-05T00:13:00",
+      "n": 1056,
+      "mae_best": 0.1157,
+      "mae_naive": 0.1989
+    },
+    {
+      "window": "2026-04-06",
+      "window_start": "2026-04-06T00:13:00",
+      "n": 1056,
+      "mae_best": 0.1462,
+      "mae_naive": 0.1165
+    },
+    {
+      "window": "2026-04-07",
+      "window_start": "2026-04-07T00:13:00",
+      "n": 1056,
+      "mae_best": 0.1358,
+      "mae_naive": 0.8116
+    },
+    {
+      "window": "2026-04-08",
+      "window_start": "2026-04-08T00:13:00",
+      "n": 1056,
+      "mae_best": 0.1212,
+      "mae_naive": 0.6989
+    },
+    {
+      "window": "2026-04-09",
+      "window_start": "2026-04-09T00:13:00",
+      "n": 1056,
+      "mae_best": 0.0854,
+      "mae_naive": 0.7869
+    },
+    {
+      "window": "2026-04-10",
+      "window_start": "2026-04-10T00:13:00",
+      "n": 957,
+      "mae_best": 0.1433,
+      "mae_naive": 0.7753
+    }
+  ],
+  "trend": {
+    "window_type": "daily",
+    "n_windows": 7,
+    "spearman_rho": 0.3571,
+    "p_value": 0.431611,
+    "relative_increase": 1.5009,
+    "drift_detected": false,
+    "interpretation": "No significant upward trend (rho=0.357, p=0.4316) \u2014 model accuracy is stable across the test period."
+  }
+}

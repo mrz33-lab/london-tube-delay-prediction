@@ -15,7 +15,6 @@ import joblib
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import seaborn as sns
 
 from config import Config, get_config, RANDOM_SEED
 from utils import setup_logging, get_latest_run_id, set_random_seeds, format_duration
@@ -65,7 +64,13 @@ def load_artifacts(artifact_dir: Path) -> dict:
 
 
 def _shap_cache_key(artifact_dir: Path, X_test: pd.DataFrame) -> str:
-    """MD5 of (model file mtime, X_test data hash) — cheap to compute."""
+    """MD5 of (model file mtime, X_test data hash) — cheap to compute.
+
+    Note: mtime changes on retrain but NOT on file copy/move, so copying
+    best_model.pkl without retraining will produce a false cache hit.
+    A content hash (MD5 of the file bytes) would be more robust but is
+    considerably slower for large model files (>50 MB).
+    """
     model_path = artifact_dir / 'best_model.pkl'
     mtime = str(model_path.stat().st_mtime) if model_path.exists() else 'missing'
     data_hash = str(pd.util.hash_pandas_object(X_test).sum())
@@ -329,7 +334,7 @@ def main():
             # get feature names from preprocessor
             try:
                 preprocessor = best_model.named_steps.get('preprocessor')
-                feature_names = list(preprocessor.get_feature_names_out())
+                feature_names = [n.split('__', 1)[-1] for n in preprocessor.get_feature_names_out()]
             except Exception:
                 n_features = shap_values.values.shape[1] if shap_values is not None else len(X_test.columns)
                 feature_names = [f'feature_{i}' for i in range(n_features)]

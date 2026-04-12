@@ -1,5 +1,4 @@
 """
-"""
 Compares the original 21-feature model against the extended 37-feature
 model on an identical temporal test set.
 
@@ -37,6 +36,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from config import get_config, RANDOM_SEED
 from data import load_data, get_train_test_split
 from features import engineer_features, prepare_features_for_model, get_feature_columns
+from utils import get_latest_run_id
 
 logging.basicConfig(
     level=logging.INFO,
@@ -60,7 +60,10 @@ LGBM_PARAMS = dict(
 # Feature list pulled from the saved model rather than hard-coded
 def _get_original_features() -> list:
     """Get the original 21-feature list from the saved model's preprocessor."""
-    model_path = ROOT / "artifacts" / "run_20260210_153030" / "best_model.pkl"
+    run_id = get_latest_run_id(ROOT / "artifacts")
+    if run_id is None:
+        raise FileNotFoundError("No trained model found in artifacts/. Run train.py first.")
+    model_path = ROOT / "artifacts" / run_id / "best_model.pkl"
     model = joblib.load(model_path)
     preprocessor  = model.named_steps["preprocessor"]
     numeric_feats  = preprocessor.transformers_[0][2]
@@ -149,10 +152,19 @@ def run() -> None:
     )
     logger.info("Full     → MAE=%.3f  RMSE=%.3f  R²=%.3f", full_mae, full_rmse, full_r2)
 
-    # Published metrics from the saved run are included as a third reference point.
-    saved_mae  = 2.01
-    saved_rmse = 4.70
-    saved_r2   = 0.194
+    # Load the saved-run metrics dynamically so this row stays accurate after
+    # retraining — previously these were hardcoded constants that silently diverged.
+    _metrics_file = ROOT / "artifacts" / run_id / "all_metrics.json"
+    try:
+        import json as _json
+        with open(_metrics_file) as _mf:
+            _saved = _json.load(_mf)
+        saved_mae  = _saved.get('best', {}).get('test_mae',  float('nan'))
+        saved_rmse = _saved.get('best', {}).get('test_rmse', float('nan'))
+        saved_r2   = _saved.get('best', {}).get('test_r2',   float('nan'))
+    except Exception as _exc:
+        logger.warning("Could not load saved metrics from %s: %s", _metrics_file, _exc)
+        saved_mae = saved_rmse = saved_r2 = float('nan')
 
     delta_from_reduced = full_mae - red_mae  # negative = full model is better
     pct_improvement    = -100.0 * delta_from_reduced / red_mae

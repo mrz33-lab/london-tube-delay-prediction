@@ -13,18 +13,20 @@ env/
 ENV/
 
 # ── Model artifacts (large binary files) ──────────────────────────────────────
-# Keep metrics, plots, and CSVs; exclude large pickled models
+# Keep metrics, plots, and CSVs; exclude large pickled models and run dirs
 artifacts/*/naive_model.pkl
 artifacts/*/ridge_model.pkl
 artifacts/*/best_model.pkl
 artifacts/*/feature_metadata.pkl
+artifacts/*/xgboost_model.pkl
+artifacts/*/lgbm_model.pkl
 
-# Exclude all run directories except the two canonical ones
-artifacts/run_20260310_154543/
-artifacts/run_20260310_155058/
-artifacts/run_20260310_155138/
-artifacts/run_20260310_155155/
-artifacts/run_20260310_163553/
+# Exclude all run directories (binary/large) — use git notes or model_info.json
+artifacts/run_*/
+
+# Optuna SQLite study database (large, regeneratable)
+artifacts/optuna_study.db
+artifacts/*.db
 
 # Keep the artifacts folder structure itself
 !artifacts/.gitkeep
@@ -65,8 +67,12 @@ build/
 
 # ── Test coverage ─────────────────────────────────────────────────────────────
 .coverage
+.coverage.*
 htmlcov/
 .pytest_cache/
+
+# ── Misc tool artifacts ────────────────────────────────────────────────────────
+.antigravityignore
 
 # ── Environment variables ─────────────────────────────────────────────────────
 .env

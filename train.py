@@ -6,6 +6,12 @@ import logging
 import json
 import subprocess
 import sys
+import warnings
+warnings.filterwarnings(
+    "ignore",
+    message="X does not have valid feature names",
+    category=UserWarning,
+)
 from pathlib import Path
 from typing import Dict, Any, Tuple, Optional
 import time
@@ -18,6 +24,7 @@ from sklearn.model_selection import RandomizedSearchCV, TimeSeriesSplit, cross_v
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 import joblib
 import optuna
+from scipy.stats import wilcoxon as _wilcoxon_test
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -87,12 +94,77 @@ def _save_model_info(artifact_dir: Path, best_model_name: str, data_mode: str,
         'lightgbm_version': lgb_version,
         'best_model': best_model_name,
         'data_mode': data_mode,
+        'target': 'delay_severity (0=Good, 1=Minor, 2=Severe — real TfL label)',
         'test_mae': round(metrics.get('test_mae', float('nan')), 4),
         'test_rmse': round(metrics.get('test_rmse', float('nan')), 4),
     }
     with open(artifact_dir / 'model_info.json', 'w') as f:
         json.dump(info, f, indent=2)
     logger.info("Saved model_info.json (git=%s)", info['git_commit'])
+
+
+def _compare_models_statistically(
+    models: Dict[str, Any],
+    X_test: pd.DataFrame,
+    y_test: pd.Series,
+    artifact_dir: Path,
+) -> Dict[str, Any]:
+    """Wilcoxon signed-rank tests for pairwise model comparison.
+
+    Uses absolute errors |y_true - y_pred| as paired observations.
+    The one-sided alternative='greater' answers: "are model A's errors
+    significantly *larger* than model B's?" — i.e. is B significantly better?
+
+    Why Wilcoxon rather than a paired t-test?
+      The t-test assumes normally distributed differences.  Prediction errors
+      on delay data are right-skewed (exponential tails from rare severe events),
+      violating that assumption.  The Wilcoxon signed-rank test is
+      distribution-free and remains valid under heavy-tailed residuals.
+
+    Results are saved to statistical_tests.json for dissertation reporting.
+    """
+    predictions = {name: model.predict(X_test) for name, model in models.items()}
+    abs_errors = {
+        name: np.abs(np.array(y_test) - preds)
+        for name, preds in predictions.items()
+    }
+
+    pairs = [
+        ('naive', 'ridge'), ('naive', 'xgboost'), ('naive', 'best'),
+        ('ridge', 'xgboost'), ('ridge', 'best'), ('xgboost', 'best'),
+    ]
+    results: Dict[str, Any] = {}
+
+    for m1, m2 in pairs:
+        if m1 not in abs_errors or m2 not in abs_errors:
+            continue
+        try:
+            # one-sided: does m1 have significantly greater error than m2?
+            stat, p_val = _wilcoxon_test(
+                abs_errors[m1], abs_errors[m2], alternative='greater'
+            )
+            results[f'{m1}_vs_{m2}'] = {
+                'statistic': round(float(stat), 4),
+                'p_value': round(float(p_val), 6),
+                'significant_at_0.05': bool(p_val < 0.05),
+                'conclusion': (
+                    f'{m2} significantly outperforms {m1} (p={p_val:.4f})'
+                    if p_val < 0.05
+                    else f'no significant difference between {m1} and {m2} (p={p_val:.4f})'
+                ),
+            }
+            logger.info(
+                "Wilcoxon %s vs %s: stat=%.1f  p=%.4f  %s",
+                m1, m2, stat, p_val,
+                "(significant)" if p_val < 0.05 else "(not significant)",
+            )
+        except Exception as exc:
+            logger.warning("Wilcoxon test failed for %s vs %s: %s", m1, m2, exc)
+
+    with open(artifact_dir / 'statistical_tests.json', 'w') as f:
+        json.dump(results, f, indent=2)
+    logger.info("Saved pairwise Wilcoxon test results to statistical_tests.json")
+    return results
 
 
 class NaiveBaselineModel:
@@ -195,7 +267,6 @@ def train_lightgbm(X_train, y_train, X_test, y_test,
     ])
 
     tscv = TimeSeriesSplit(n_splits=config.models.cv_splits)
-    X_train_processed = np.asarray(preprocessor.fit_transform(X_train))
 
     def objective(trial):
         space = config.models.lightgbm_optuna_space
@@ -211,25 +282,39 @@ def train_lightgbm(X_train, y_train, X_test, y_test,
             'reg_lambda': trial.suggest_float('reg_lambda', space['reg_lambda']['low'], space['reg_lambda']['high'])
         }
 
-        model = lgb.LGBMRegressor(
-            random_state=RANDOM_SEED,
-            verbosity=-1,
-            force_col_wise=True,
-            **params
-        )
+        # Wrap preprocessing + estimator in a single Pipeline so cross_val_score
+        # refits the ColumnTransformer on each CV fold's training portion.
+        # Previously the preprocessor was fit once on the full X_train and passed
+        # as a pre-processed array, causing train-set statistics (mean, std) to
+        # leak into every validation fold.
+        trial_pipeline = Pipeline([
+            ('preprocessor', create_preprocessing_pipeline(numeric_features, categorical_features)),
+            ('regressor', lgb.LGBMRegressor(
+                random_state=RANDOM_SEED,
+                verbosity=-1,
+                force_col_wise=True,
+                **params
+            ))
+        ])
 
         scores = cross_val_score(
-            model, X_train_processed, y_train, cv=tscv,
+            trial_pipeline, X_train, y_train, cv=tscv,
             scoring=config.models.scoring, n_jobs=-1
         )
-        
-        # We maximize negative MAE or minimize MAE. Optuna defaults to minimize.
-        # But if scoring is "neg_mean_absolute_error", higher is better (closer to 0).
-        # We should tell Optuna to maximize.
+
+        # scoring="neg_mean_absolute_error" returns values in (-∞, 0].
+        # Maximising neg-MAE is equivalent to minimising MAE — a score
+        # closer to 0 is better, so direction="maximize" is correct.
         return scores.mean()
 
     optuna.logging.set_verbosity(optuna.logging.WARNING)
-    study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=RANDOM_SEED))
+    study = optuna.create_study(
+        direction="maximize",
+        sampler=optuna.samplers.TPESampler(seed=RANDOM_SEED),
+        storage=f"sqlite:///{config.paths.artifacts_dir}/optuna_study.db",
+        study_name="lgbm_tube_delay",
+        load_if_exists=True,
+    )
     study.optimize(objective, n_trials=config.models.optuna_n_trials, n_jobs=1)
 
     logger.info(f"Best LightGBM params: {study.best_params}")
@@ -249,6 +334,56 @@ def train_lightgbm(X_train, y_train, X_test, y_test,
     metrics['best_params'] = study.best_params
 
     logger.info(f"LightGBM - Test MAE: {metrics['test_mae']:.3f}, Test RMSE: {metrics['test_rmse']:.3f}")
+    return best_model, metrics
+
+
+def train_xgboost(X_train, y_train, X_test, y_test,
+                  numeric_features, categorical_features, config):
+    """XGBoost with RandomizedSearchCV — primary advanced model alongside LightGBM."""
+    if not XGBOOST_AVAILABLE:
+        return None, None
+
+    logger.info("Training XGBoost model...")
+
+    preprocessor = create_preprocessing_pipeline(numeric_features, categorical_features)
+    pipeline = Pipeline([
+        ('preprocessor', preprocessor),
+        ('regressor', xgb.XGBRegressor(random_state=RANDOM_SEED, verbosity=0))
+    ])
+
+    tscv = TimeSeriesSplit(n_splits=config.models.cv_splits)
+
+    param_grid = {
+        'regressor__n_estimators': [100, 200, 300],
+        'regressor__max_depth': [3, 5, 7],
+        'regressor__learning_rate': [0.05, 0.1, 0.2],
+        'regressor__subsample': [0.7, 0.8, 1.0],
+        'regressor__colsample_bytree': [0.7, 0.8, 1.0],
+        'regressor__reg_alpha': [0.0, 0.1, 1.0],
+        'regressor__reg_lambda': [1.0, 5.0, 10.0],
+    }
+
+    search = RandomizedSearchCV(
+        pipeline,
+        param_distributions=param_grid,
+        n_iter=config.models.n_iter_search,
+        cv=tscv,
+        scoring=config.models.scoring,
+        random_state=RANDOM_SEED,
+        n_jobs=-1,
+        verbose=0,
+    )
+    search.fit(X_train, y_train)
+    logger.info("Best XGBoost params: %s", search.best_params_)
+
+    best_model = search.best_estimator_
+    metrics = evaluate_model(best_model, X_train, y_train, X_test, y_test)
+    metrics['best_params'] = search.best_params_
+
+    logger.info(
+        "XGBoost - Test MAE: %.3f, Test RMSE: %.3f",
+        metrics['test_mae'], metrics['test_rmse'],
+    )
     return best_model, metrics
 
 
@@ -492,22 +627,46 @@ def main():
         models['best'] = best_model
         all_metrics['best'] = best_metrics
 
+        logger.info("\n--- XGBoost (primary comparison model) ---")
+        if XGBOOST_AVAILABLE:
+            xgb_model, xgb_metrics = train_xgboost(
+                X_train, y_train, X_test, y_test,
+                numeric_features, categorical_features, config
+            )
+            if xgb_model is not None:
+                models['xgboost'] = xgb_model
+                all_metrics['xgboost'] = xgb_metrics
+        else:
+            logger.info("XGBoost not available — skipping")
+
         # ---- MODEL COMPARISON ----
         logger.info("\n" + "=" * 80)
         logger.info("STEP 4: Model Comparison")
         logger.info("=" * 80)
 
+        _model_order = [
+            ('naive',    'Naive'),
+            ('ridge',    'Ridge'),
+            ('xgboost',  'XGBoost'),
+            ('best',     best_model_name.title()),
+        ]
+        _rows = [(key, label) for key, label in _model_order if key in all_metrics]
         comparison_df = pd.DataFrame({
-            'Model': ['Naive', 'Ridge', best_model_name.title()],
-            'Train MAE': [all_metrics[m]['train_mae'] for m in ['naive', 'ridge', 'best']],
-            'Test MAE': [all_metrics[m]['test_mae'] for m in ['naive', 'ridge', 'best']],
-            'Train RMSE': [all_metrics[m]['train_rmse'] for m in ['naive', 'ridge', 'best']],
-            'Test RMSE': [all_metrics[m]['test_rmse'] for m in ['naive', 'ridge', 'best']],
-            'Test R²': [all_metrics[m]['test_r2'] for m in ['naive', 'ridge', 'best']],
+            'Model':      [label for _, label in _rows],
+            'Train MAE':  [all_metrics[k]['train_mae']  for k, _ in _rows],
+            'Test MAE':   [all_metrics[k]['test_mae']   for k, _ in _rows],
+            'Train RMSE': [all_metrics[k]['train_rmse'] for k, _ in _rows],
+            'Test RMSE':  [all_metrics[k]['test_rmse']  for k, _ in _rows],
+            'Test R²':    [all_metrics[k]['test_r2']    for k, _ in _rows],
+            'Test MAPE':  [all_metrics[k].get('test_mape', float('nan')) for k, _ in _rows],
         })
 
         logger.info("\n" + comparison_df.to_string(index=False))
         comparison_df.to_csv(artifact_dir / 'model_comparison.csv', index=False)
+
+        # ---- STATISTICAL SIGNIFICANCE TESTS ----
+        logger.info("\n--- Pairwise Wilcoxon Significance Tests ---")
+        _compare_models_statistically(models, X_test, y_test, artifact_dir)
 
         # ---- PER-LINE RESIDUAL QUANTILES ----
         # used by FutureDelayPredictor for proper 95% CIs
@@ -533,10 +692,43 @@ def main():
                     f"Only {len(res_line)} test obs for {line_name}, using global quantiles"
                 )
 
-        # re-save with actual quantiles
+        # compute training-set means for network features so inference predictor
+        # can use in-distribution defaults instead of hard-coded zeros
+        _network_cols = [
+            'network_avg_delay', 'network_delay_volatility',
+            'lines_disrupted_ratio', 'is_network_wide_disruption',
+        ]
+        network_feature_means = {
+            col: float(train_df[col].mean())
+            for col in _network_cols
+            if col in train_df.columns
+        }
+
+        # ---- CONFORMAL CALIBRATION SCORES ----
+        # Split the test set: first half → calibration, second half → evaluation.
+        # This is the standard split-conformal protocol (Vovk et al., 2005;
+        # Angelopoulos & Bates, 2022).  Non-conformity score: |y_true - y_pred|.
+        # At inference time, FutureDelayPredictor uses the empirical quantile of
+        # these scores to build a PI with a guaranteed marginal coverage rate of
+        # ≥ 1-α under exchangeability — no distributional assumptions required.
+        n_cal = len(y_test) // 2
+        y_pred_cal_half = models['best'].predict(X_test.iloc[:n_cal])
+        conformal_cal_scores = np.abs(
+            np.array(y_test.iloc[:n_cal]) - y_pred_cal_half
+        )
+        logger.info(
+            "Conformal calibration (n=%d): median=%.3f  q95=%.3f",
+            n_cal,
+            float(np.median(conformal_cal_scores)),
+            float(np.percentile(conformal_cal_scores, 95)),
+        )
+
+        # re-save with actual quantiles + network means + conformal scores
         save_feature_metadata(
             numeric_features, categorical_features, artifact_dir,
             residual_quantiles=residual_quantiles,
+            network_feature_means=network_feature_means,
+            conformal_cal_scores=conformal_cal_scores,
         )
         logger.info(
             "Per-line residual quantiles computed for %d lines",
@@ -586,18 +778,71 @@ def main():
             'actual': y_test.values,
             'pred_naive': models['naive'].predict(X_test),
             'pred_ridge': models['ridge'].predict(X_test),
-            'pred_best': models['best'].predict(X_test)
+            'pred_best': models['best'].predict(X_test),
+            **({'pred_xgboost': models['xgboost'].predict(X_test)}
+               if 'xgboost' in models else {}),
         })
         test_predictions.to_csv(artifact_dir / 'test_predictions.csv', index=False)
 
         X_train.to_parquet(artifact_dir / 'X_train.parquet')
         X_test.to_parquet(artifact_dir / 'X_test.parquet')
+        y_test.rename('delay_severity').to_frame().to_parquet(
+            artifact_dir / 'y_test.parquet'
+        )
         logger.info("Saved featured train/test data for SHAP analysis")
+
+        # Save regression targets so classify.py standalone can load them.
+        # prepare_features_for_model excludes the target from X_train, so we
+        # persist y_train separately rather than re-adding it to the parquet.
+        y_train.reset_index(drop=True).rename('delay_minutes').to_csv(
+            artifact_dir / 'y_train.csv', index=False
+        )
+        logger.info("Saved y_train.csv for classification pipeline")
+
+        # Save raw TfL status labels aligned to X_train/X_test.
+        # Using the original status column (not labels re-derived from delay_minutes)
+        # eliminates the circularity in classify.py's ordinal task: for real data,
+        # status is the true TfL label and delay_minutes is a proxy derived FROM it,
+        # so re-mapping delay → status would just invert a known function.
+        train_df.loc[X_train.index, 'status'].reset_index(drop=True).rename('status').to_csv(
+            artifact_dir / 'y_train_status.csv', index=False
+        )
+        test_df.loc[X_test.index, 'status'].reset_index(drop=True).rename('status').to_csv(
+            artifact_dir / 'y_test_status.csv', index=False
+        )
+        logger.info("Saved y_train_status.csv and y_test_status.csv for classification pipeline")
 
         with open(artifact_dir / 'best_model_name.txt', 'w') as f:
             f.write(best_model_name)
 
         _save_model_info(artifact_dir, best_model_name, data_mode, all_metrics['best'])
+
+        # ---- CLASSIFICATION EVALUATION ----
+        # Called after ALL primary artifacts are saved so a classify failure
+        # never prevents the regression artifacts from being persisted.
+        logger.info("\n--- Running Classification Evaluation ---")
+        try:
+            from classify import run_classification_evaluation
+            y_train_status_arr = pd.read_csv(artifact_dir / 'y_train_status.csv')['status'].values
+            y_test_status_arr  = pd.read_csv(artifact_dir / 'y_test_status.csv')['status'].values
+            run_classification_evaluation(
+                artifact_dir=artifact_dir,
+                config=config,
+                X_train=X_train,
+                y_train_reg=np.array(y_train),
+                X_test=X_test,
+                y_test_reg=np.array(y_test),
+                test_timestamps=test_df.loc[X_test.index, config.features.time_column].reset_index(drop=True),
+                numeric_features=numeric_features,
+                categorical_features=categorical_features,
+                y_train_status=y_train_status_arr,
+                y_test_status=y_test_status_arr,
+            )
+            logger.info("Classification evaluation complete")
+        except Exception as exc:
+            logger.warning(
+                "Classification evaluation failed (non-fatal): %s", exc, exc_info=True
+            )
 
         # ---- DONE ----
         elapsed = time.time() - start_time
@@ -607,7 +852,7 @@ def main():
         logger.info(f"Total time: {format_duration(elapsed)}")
         logger.info(f"Artifact directory: {artifact_dir}")
         logger.info(f"Best model: {best_model_name}")
-        logger.info(f"Best model Test MAE: {all_metrics['best']['test_mae']:.3f}")
+        logger.info(f"Best model Test MAE: {all_metrics['best']['test_mae']:.3f} severity units")
         logger.info(f"Improvement over naive: {(1 - all_metrics['best']['test_mae']/all_metrics['naive']['test_mae'])*100:.1f}%")
         logger.info("=" * 80)
 

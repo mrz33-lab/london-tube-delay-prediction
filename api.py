@@ -19,15 +19,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Tuple
 from pathlib import Path
 import logging
 
-from config import DataConfig
+from config import ApiConfig, DataConfig
 from future_prediction import FutureDelayPredictor
 from exceptions import ModelNotLoadedError
+from utils import get_latest_run_id
 
 _DATA_CONFIG = DataConfig()
+_API_CONFIG = ApiConfig()
 
 logger = logging.getLogger(__name__)
 
@@ -48,8 +50,10 @@ class _RateLimiter:
     def is_allowed(self, key: str) -> bool:
         now = time.time()
         with self._lock:
-            # evict timestamps older than the window; delete key when bucket empties
             calls = [t for t in self._buckets.get(key, []) if now - t < self._window]
+            # evict idle bucket immediately so stale IPs don't accumulate in memory
+            if not calls and key in self._buckets:
+                del self._buckets[key]
             if len(calls) >= self._max:
                 self._buckets[key] = calls
                 return False
@@ -58,7 +62,10 @@ class _RateLimiter:
             return True
 
 
-_limiter = _RateLimiter(max_calls=60, window_seconds=60)  # 60 req/min per IP
+_limiter = _RateLimiter(
+    max_calls=_API_CONFIG.rate_limit_max_calls,
+    window_seconds=_API_CONFIG.rate_limit_window_seconds,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -127,12 +134,9 @@ async def rate_limit_middleware(request: Request, call_next):
 
 
 def _resolve_latest_run_id(artifacts_dir: Path) -> Optional[str]:
-    if not artifacts_dir.exists():
-        return None
-    run_dirs = sorted(
-        [d.name for d in artifacts_dir.iterdir() if d.is_dir() and d.name.startswith("run_")]
-    )
-    return run_dirs[-1] if run_dirs else None
+    # Delegates to utils.get_latest_run_id which sorts by mtime — consistent
+    # with the Streamlit dashboard and the analysis scripts.
+    return get_latest_run_id(artifacts_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -162,21 +166,23 @@ class PredictionRequest(BaseModel):
     @field_validator('datetime')
     @classmethod
     def validate_datetime(cls, v):
+        # Separate format validation from value validation so the error messages
+        # are unambiguous: a past-but-valid timestamp produces a different message
+        # from a malformed string.
         try:
             dt = datetime.fromisoformat(v.replace('Z', '+00:00'))
-            dt_naive = dt.replace(tzinfo=None)
-            if dt_naive < datetime.now():
-                raise ValueError("Datetime must be in the future (or present)")
-            return v
-        except ValueError as exc:
-            raise ValueError(f"Invalid datetime format. Use ISO 8601: {exc}") from exc
+        except ValueError:
+            raise ValueError("Invalid datetime format — use ISO 8601 (e.g. 2027-06-01T09:00:00)")
+        if dt.replace(tzinfo=None) < datetime.now():
+            raise ValueError("Datetime must be in the future (or present)")
+        return v
 
 
 class PredictionResponse(BaseModel):
     line: str
     datetime: str
     predicted_delay_minutes: float
-    confidence_interval_95: tuple
+    confidence_interval_95: Tuple[float, float]
     status: str
     status_emoji: str
     model_version: str
@@ -206,7 +212,9 @@ async def _load_model(app: FastAPI):
     If artifacts exist but the model fails to load, raises RuntimeError so
     the application fails fast rather than silently serving 503 forever.
     """
-    artifacts_root = Path("artifacts")
+    # Use an absolute path anchored to this file so the API works correctly
+    # regardless of the working directory from which uvicorn is launched.
+    artifacts_root = Path(__file__).parent / "artifacts"
     run_id = _resolve_latest_run_id(artifacts_root)
 
     if run_id is None:
@@ -247,16 +255,19 @@ async def root():
     }
 
 
-@app.get("/health", response_model=HealthResponse, tags=["Health"])
+@app.get("/health", tags=["Health"])
 async def health_check(http_request: Request):
     predictor = http_request.app.state.predictor
     active_run_id = http_request.app.state.active_run_id
-    return HealthResponse(
+    payload = HealthResponse(
         status="healthy" if predictor is not None else "unhealthy",
         model_loaded=predictor is not None,
         model_version=active_run_id if predictor else None,
         timestamp=datetime.now().isoformat()
     )
+    if predictor is None:
+        return JSONResponse(status_code=503, content=payload.model_dump())
+    return payload
 
 
 def _make_prediction_response(predictor, active_run_id, body):
@@ -340,8 +351,17 @@ async def predict_forecast(http_request: Request, line: str,
     if predictor is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
 
-    if hours_ahead > 168:
-        raise HTTPException(status_code=400, detail="Max forecast horizon is 168 hours (1 week)")
+    if hours_ahead > _API_CONFIG.max_forecast_hours:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Max forecast horizon is {_API_CONFIG.max_forecast_hours} hours (1 week)",
+        )
+
+    if line not in _DATA_CONFIG.tube_lines:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid line. Must be one of: {', '.join(_DATA_CONFIG.tube_lines)}",
+        )
 
     try:
         forecast_df = predictor.predict_next_24_hours(
@@ -357,7 +377,7 @@ async def predict_forecast(http_request: Request, line: str,
                 "predicted_delay_minutes": round(row['predicted_delay'], 2),
                 "status": row['status'],
             }
-            for _, row in forecast_df.iterrows()
+            for row in forecast_df.to_dict('records')
         ]
 
         return {
@@ -373,6 +393,21 @@ async def predict_forecast(http_request: Request, line: str,
 @app.get("/lines", tags=["Info"])
 async def get_lines():
     return {"lines": _DATA_CONFIG.tube_lines}
+
+
+# ---------------------------------------------------------------------------
+# /v1/ versioned aliases — canonical paths for forward compatibility.
+# The unversioned paths above remain as backward-compatible aliases.
+# Breaking changes in a future v2 will only affect /v2/ routes, leaving
+# existing clients unaffected.
+# ---------------------------------------------------------------------------
+
+app.add_api_route("/v1/",               root,            methods=["GET"],  tags=["Info v1"])
+app.add_api_route("/v1/health",         health_check,    methods=["GET"],  tags=["Health v1"])
+app.add_api_route("/v1/predict",        predict_delay,   methods=["POST"], tags=["Predictions v1"])
+app.add_api_route("/v1/predict/batch",  predict_batch,   methods=["POST"], tags=["Predictions v1"])
+app.add_api_route("/v1/predict/forecast", predict_forecast, methods=["POST"], tags=["Predictions v1"])
+app.add_api_route("/v1/lines",          get_lines,       methods=["GET"],  tags=["Info v1"])
 
 
 if __name__ == "__main__":

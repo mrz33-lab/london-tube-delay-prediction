@@ -21,6 +21,7 @@ def test_feature_engineering_output_shape():
         'line': ['Central'] * 50,
         'status': ['Good Service'] * 50,
         'delay_minutes': [5.0] * 50,
+        'delay_severity': [0] * 50,
         'temp_c': [15.0] * 50,
         'precipitation_mm': [0.0] * 50,
         'humidity': [60.0] * 50,
@@ -59,6 +60,7 @@ def test_get_feature_columns():
         'line': ['Central'] * 10,
         'status': ['Good Service'] * 10,
         'delay_minutes': [5.0] * 10,
+        'delay_severity': [0] * 10,
         'temp_c': [15.0] * 10,
         'precipitation_mm': [0.0] * 10,
         'humidity': [60.0] * 10,
@@ -118,6 +120,7 @@ def test_interaction_features():
         'line': ['Central'] * 10,
         'status': ['Good Service'] * 10,
         'delay_minutes': [5.0] * 10,
+        'delay_severity': [0] * 10,
         'temp_c': [15.0] * 10,
         'precipitation_mm': [10.0] * 10,
         'humidity': [60.0] * 10,
@@ -143,11 +146,13 @@ def test_interaction_features():
 def test_rolling_features_calculation():
     config = get_config()
 
+    # Use delay_severity=1 (Minor Delays) so rolling mean has a non-zero signal
     df = pd.DataFrame({
         'timestamp': pd.date_range(start='2024-01-01', periods=20, freq='1h'),
         'line': ['Central'] * 20,
-        'status': ['Good Service'] * 20,
+        'status': ['Minor Delays'] * 20,
         'delay_minutes': [10.0] * 20,
+        'delay_severity': [1] * 20,
         'temp_c': [15.0] * 20,
         'precipitation_mm': [0.0] * 20,
         'humidity': [60.0] * 20,
@@ -162,11 +167,12 @@ def test_rolling_features_calculation():
 
     df_featured = engineer_features(df, config, is_training=True)
 
+    # rolling mean of delay_severity=1 should be close to 1.0 (not 0.0)
     rolling_mean = df_featured['rolling_mean_delay_3'].dropna()
 
     if len(rolling_mean) > 0:
-        assert rolling_mean.mean() > 9.0
-        assert rolling_mean.mean() < 11.0
+        assert rolling_mean.mean() > 0.9
+        assert rolling_mean.mean() <= 1.0
 
 
 def test_disruption_rate_calculation():
@@ -177,6 +183,7 @@ def test_disruption_rate_calculation():
         'line': ['Central'] * 30,
         'status': ['Good Service'] * 15 + ['Minor Delays'] * 15,
         'delay_minutes': [5.0] * 30,
+        'delay_severity': [0] * 30,
         'temp_c': [15.0] * 30,
         'precipitation_mm': [0.0] * 30,
         'humidity': [60.0] * 30,
@@ -203,6 +210,7 @@ def test_weather_delta_features():
         'line': ['Central'] * 10,
         'status': ['Good Service'] * 10,
         'delay_minutes': [5.0] * 10,
+        'delay_severity': [0] * 10,
         'temp_c': [10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0],
         'precipitation_mm': [0.0, 0.0, 1.0, 2.0, 3.0, 2.0, 1.0, 0.0, 0.0, 0.0],
         'humidity': [60.0] * 10,

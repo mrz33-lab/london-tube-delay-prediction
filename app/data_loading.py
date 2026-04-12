@@ -61,6 +61,17 @@ def load_artifacts(artifact_dir: str) -> Dict:
         if best_p.exists():
             artifacts["best_model_name"] = best_p.read_text().strip()
 
+        # Classification results (written by classify.py inside train.py)
+        clf_p = path / "classification" / "classification_results.json"
+        if clf_p.exists():
+            with open(clf_p) as f:
+                artifacts["classification_results"] = json.load(f)
+
+        # XGBoost model (present when XGBoost is installed)
+        xgb_p = path / "xgboost_model.pkl"
+        if xgb_p.exists():
+            artifacts["xgboost_model"] = joblib.load(xgb_p)
+
     except Exception as exc:
         st.error(f"Error loading artifacts: {exc}")
 

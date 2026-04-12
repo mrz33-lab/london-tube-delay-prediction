@@ -6,19 +6,26 @@ from fastapi.testclient import TestClient
 import datetime as dt
 import pandas as pd
 
+# Relative future timestamps so tests don't expire when the calendar catches up.
+# All "future" API calls use _FUTURE_DT; mocks return _MOCK_DT as the response
+# datetime.  Both are more than a year ahead to avoid flapping near boundaries.
+_FUTURE_DT = dt.datetime.now() + dt.timedelta(days=400)
+_FUTURE_STR = _FUTURE_DT.strftime("%Y-%m-%dT%H:%M:%S")
+_MOCK_DT = _FUTURE_DT
+
 
 def _make_mock_predictor():
     mock = MagicMock()
     mock.predict_delay.return_value = {
         'line': 'Central',
-        'datetime': dt.datetime(2027, 1, 1, 9, 0),
+        'datetime': _MOCK_DT,
         'predicted_delay_minutes': 3.5,
         'confidence_interval_95': (0.57, 6.43),
         'status': 'Minor Delays',
         'features_used': [],
     }
     mock.predict_next_24_hours.return_value = pd.DataFrame([
-        {'datetime': dt.datetime(2027, 1, 1, h), 'predicted_delay': 2.0, 'status': 'Good Service'}
+        {'datetime': _MOCK_DT + dt.timedelta(hours=h), 'predicted_delay': 2.0, 'status': 'Good Service'}
         for h in range(24)
     ])
     return mock
@@ -70,7 +77,7 @@ def test_health_check_healthy(client):
 
 def test_health_check_unhealthy(client_no_model):
     response = client_no_model.get("/health")
-    assert response.status_code == 200
+    assert response.status_code == 503
     data = response.json()
     assert data["status"] == "unhealthy"
     assert data["model_loaded"] is False
@@ -79,7 +86,7 @@ def test_health_check_unhealthy(client_no_model):
 def test_predict_valid_request(client):
     response = client.post("/predict", json={
         "line": "Central",
-        "datetime": "2027-06-01T09:00:00"
+        "datetime": _FUTURE_STR
     })
     assert response.status_code == 200
     data = response.json()
@@ -93,7 +100,7 @@ def test_predict_valid_request(client):
 def test_predict_invalid_line(client):
     response = client.post("/predict", json={
         "line": "Hogwarts Express",
-        "datetime": "2027-06-01T09:00:00"
+        "datetime": _FUTURE_STR
     })
     assert response.status_code == 422
 
@@ -109,7 +116,7 @@ def test_predict_past_datetime(client):
 def test_predict_no_model(client_no_model):
     response = client_no_model.post("/predict", json={
         "line": "Central",
-        "datetime": "2027-06-01T09:00:00"
+        "datetime": _FUTURE_STR
     })
     assert response.status_code == 503
 
@@ -126,8 +133,8 @@ def test_get_lines(client):
 def test_batch_predict_valid(client):
     response = client.post("/predict/batch", json={
         "predictions": [
-            {"line": "Central", "datetime": "2027-06-01T09:00:00"},
-            {"line": "Jubilee", "datetime": "2027-06-01T10:00:00"},
+            {"line": "Central", "datetime": _FUTURE_STR},
+            {"line": "Jubilee", "datetime": (_FUTURE_DT + dt.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S")},
         ]
     })
     assert response.status_code == 200
@@ -137,9 +144,20 @@ def test_batch_predict_valid(client):
     assert data["failed"] == 0
 
 
+def test_batch_predict_at_limit(client):
+    """Exactly 100 predictions should succeed (boundary at the limit)."""
+    predictions = [
+        {"line": "Central", "datetime": _FUTURE_STR}
+        for _ in range(100)
+    ]
+    response = client.post("/predict/batch", json={"predictions": predictions})
+    assert response.status_code == 200
+    assert response.json()["total_requested"] == 100
+
+
 def test_batch_predict_exceeds_limit(client):
     predictions = [
-        {"line": "Central", "datetime": "2027-06-01T09:00:00"}
+        {"line": "Central", "datetime": _FUTURE_STR}
         for _ in range(101)
     ]
     response = client.post("/predict/batch", json={"predictions": predictions})
@@ -185,7 +203,7 @@ def test_forecast_endpoint_exceeds_horizon(client):
 
 def test_predict_batch_no_model(client_no_model):
     response = client_no_model.post("/predict/batch", json={
-        "predictions": [{"line": "Central", "datetime": "2027-06-01T09:00:00"}]
+        "predictions": [{"line": "Central", "datetime": _FUTURE_STR}]
     })
     assert response.status_code == 503
 
@@ -193,7 +211,7 @@ def test_predict_batch_no_model(client_no_model):
 def test_predict_with_weather_forecast(client):
     response = client.post("/predict", json={
         "line": "Central",
-        "datetime": "2027-06-01T09:00:00",
+        "datetime": _FUTURE_STR,
         "weather_forecast": {"temperature": 20.0, "precipitation": 5.0, "humidity": 65.0},
     })
     assert response.status_code == 200
@@ -213,7 +231,7 @@ def test_predict_value_error_returns_400(client):
         with _TC(api.app) as c:
             response = c.post("/predict", json={
                 "line": "Central",
-                "datetime": "2027-06-01T09:00:00",
+                "datetime": _FUTURE_STR,
             })
     assert response.status_code == 400
 
@@ -257,7 +275,7 @@ def test_predict_general_exception_returns_500(client):
         with _TC(api.app) as c:
             response = c.post("/predict", json={
                 "line": "Central",
-                "datetime": "2027-06-01T09:00:00",
+                "datetime": _FUTURE_STR,
             })
     assert response.status_code == 500
 
@@ -284,8 +302,8 @@ def test_batch_predict_partial_error(client):
         with _TC(api.app) as c:
             response = c.post("/predict/batch", json={
                 "predictions": [
-                    {"line": "Central", "datetime": "2027-06-01T09:00:00"},
-                    {"line": "Jubilee", "datetime": "2027-06-01T09:00:00"},
+                    {"line": "Central", "datetime": _FUTURE_STR},
+                    {"line": "Jubilee", "datetime": _FUTURE_STR},
                 ]
             })
     assert response.status_code == 200
@@ -381,13 +399,13 @@ def test_lifespan_degraded_on_runtime_error():
             # predictor is None, so /predict must return 503
             response = c.post("/predict", json={
                 "line": "Central",
-                "datetime": "2027-06-01T09:00:00",
+                "datetime": _FUTURE_STR,
             })
             assert response.status_code == 503
 
-            # health endpoint must report 'unhealthy'
+            # health endpoint must report 'unhealthy' with 503
             health = c.get("/health")
-            assert health.status_code == 200
+            assert health.status_code == 503
             assert health.json()["status"] == "unhealthy"
 
 

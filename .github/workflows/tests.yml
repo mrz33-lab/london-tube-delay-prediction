@@ -32,18 +32,18 @@ jobs:
 
       - name: Lint with flake8
         run: |
-          # stop the build on syntax errors or undefined names
+          # stop the build on syntax errors or undefined names (all directories)
           flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics \
-            --exclude=artifacts,data,analysis,app
+            --exclude=artifacts,data
           # warn on style issues (non-blocking)
           flake8 . --count --max-line-length=120 --statistics \
-            --exclude=artifacts,data,analysis,app --exit-zero
+            --exclude=artifacts,data --exit-zero
 
       - name: Type-check with mypy
         run: |
           mypy config.py features.py utils.py train.py api.py future_prediction.py data.py \
+            classify.py exceptions.py \
             --ignore-missing-imports --no-strict-optional
-        continue-on-error: true
 
       - name: Run pytest with coverage
         run: |
@@ -57,5 +57,6 @@ jobs:
             --cov=future_prediction \
             --cov=config \
             --cov=exceptions \
+            --cov=classify \
             --cov-report=term-missing \
             --cov-fail-under=85

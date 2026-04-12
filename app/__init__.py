@@ -23,6 +23,7 @@ from app.tabs import (
     render_diagnostics_tab,
     render_data_collection_tab,
     render_about_tab,
+    render_risk_tab,
 )
 
 import sys
@@ -96,11 +97,12 @@ def main() -> None:
             st.sidebar.caption(f"Viewing snapshot: {str(replay_ts)[:16]}")
 
     # ── Tabs ─────────────────────────────────────────────────────────────────
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "Live Overview",
         "Simulator",
         "Model Diagnostics",
         "Data Pipeline",
+        "Risk Map",
         "About",
     ])
 
@@ -120,6 +122,9 @@ def main() -> None:
         render_data_collection_tab(config, dark)
 
     with tab5:
+        render_risk_tab(artifacts, dark)
+
+    with tab6:
         render_about_tab(artifacts)
 
     # ── Footer ───────────────────────────────────────────────────────────────

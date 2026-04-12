@@ -103,8 +103,8 @@ def test_full_pipeline_trains_and_predicts(tmp_path, tiny_multiline_df):
     assert result['line'] == 'Central'
     assert result['predicted_delay_minutes'] >= 0.0
     ci_lo, ci_hi = result['confidence_interval_95']
-    assert ci_lo <= result['predicted_delay_minutes'] <= ci_hi or ci_lo <= ci_hi, \
-        f"CI [{ci_lo}, {ci_hi}] is invalid"
+    assert ci_lo <= ci_hi, f"CI is inverted: [{ci_lo}, {ci_hi}]"
+    assert result['predicted_delay_minutes'] >= 0.0, "Negative delay prediction"
     assert result['status'] in ('Good Service', 'Minor Delays', 'Severe Delays')
 
 
@@ -233,4 +233,20 @@ def test_feature_count_train_inference_match(tmp_path, tiny_multiline_df):
     assert not missing_at_inference, (
         f"Features present at training but missing at inference: {missing_at_inference}\n"
         "Update FutureDelayPredictor._engineer_features() to match engineer_features()."
+    )
+
+    # Value-level parity: peak_time must match between training formula and
+    # inference predictor for both a weekday peak hour and a weekend peak hour.
+    # Using a weekday (Monday) at 8am — should be peak on both sides.
+    monday_8am = datetime(2024, 1, 1, 8, 0)   # 2024-01-01 is a Monday
+    saturday_8am = datetime(2024, 1, 6, 8, 0)  # 2024-01-06 is a Saturday
+
+    inf_monday = predictor._engineer_features('Jubilee', monday_8am, None, None)
+    inf_saturday = predictor._engineer_features('Jubilee', saturday_8am, None, None)
+
+    assert inf_monday['peak_time'].iloc[0] == 1, (
+        "peak_time should be 1 on Monday at 08:00 — weekday rush hour"
+    )
+    assert inf_saturday['peak_time'].iloc[0] == 0, (
+        "peak_time should be 0 on Saturday at 08:00 — weekend, not a peak period"
     )

@@ -1,20 +1,18 @@
 """
-"""
 Per-line ARIMA/SARIMA baseline comparison against LightGBM.
 
 ARIMA uses only the delay time series with no exogenous features, so
 it tests whether weather/network/temporal features actually add value
 beyond simple delay autocorrelation.
 
-Attempts SARIMA(1,1,1)(1,1,1,24) first and falls back to ARIMA(1,1,1)
-if convergence fails.
+Attempts SARIMA(1,1,1)(1,1,1,96) first and falls back to ARIMA(1,1,1)
+if convergence fails. Seasonal period 96 = one day at 15-min resolution.
 
 Run from the project root:
     python analysis/arima_baseline.py
 """
 
 import sys
-import subprocess
 import logging
 from pathlib import Path
 import warnings
@@ -22,16 +20,8 @@ import warnings
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-# Install statsmodels on demand so the script works in fresh environments
-try:
-    import statsmodels.api as sm
-    from statsmodels.tsa.statespace.sarimax import SARIMAX
-except ImportError:
-    logger_bootstrap = logging.getLogger("bootstrap")
-    logger_bootstrap.warning("statsmodels not found — installing via pip...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "statsmodels"])
-    import statsmodels.api as sm
-    from statsmodels.tsa.statespace.sarimax import SARIMAX
+import statsmodels.api as sm  # noqa: F401 — referenced via SARIMAX only
+from statsmodels.tsa.statespace.sarimax import SARIMAX
 
 import numpy as np
 import pandas as pd
@@ -44,6 +34,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 from config import get_config
 from data import load_data, get_train_test_split
 from features import engineer_features, prepare_features_for_model
+from utils import get_latest_run_id
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,9 +42,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-MIN_SAMPLES = 50          # Minimum training observations required for a stable ARIMA fit.
+MIN_SAMPLES = 50  # Rule of thumb: at least 50 obs for a stable ARIMA/SARIMA fit.
 SARIMA_ORDER    = (1, 1, 1)
-SARIMA_SEASONAL = (1, 1, 1, 24)
+SARIMA_SEASONAL = (1, 1, 1, 96)  # 96 periods × 15 min = 1 day
 ARIMA_ORDER     = (1, 1, 1)
 
 
@@ -124,7 +115,10 @@ def run() -> None:
     logger.info("Split boundary timestamp: %s", split_ts)
 
     # --- Load LightGBM model for comparison ---
-    model_path = ROOT / "artifacts" / "run_20260210_153030" / "best_model.pkl"
+    run_id = get_latest_run_id(ROOT / "artifacts")
+    if run_id is None:
+        raise FileNotFoundError("No trained model found in artifacts/. Run train.py first.")
+    model_path = ROOT / "artifacts" / run_id / "best_model.pkl"
     lgbm_model = joblib.load(model_path)
     preprocessor  = lgbm_model.named_steps["preprocessor"]
     numeric_feats  = preprocessor.transformers_[0][2]
@@ -213,7 +207,7 @@ def run() -> None:
     if fallback_lines:
         print(f"\n*ARIMA(1,1,1) fallback used for: {', '.join(fallback_lines)}*")
     else:
-        print("\n*All lines used SARIMA(1,1,1)(1,1,1,24) successfully.*")
+        print("\n*All lines used SARIMA(1,1,1)(1,1,1,96) successfully.*")
 
     # --- Grouped bar chart ---
     valid = results.dropna(subset=["lgbm_mae"])

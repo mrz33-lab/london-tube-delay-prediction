@@ -1,6 +1,4 @@
-"""
-"""
-Per-line prediction performance analysis.
+"""Per-line prediction performance analysis.
 
 Replicates the 80/20 temporal split from training, then computes
 MAE, RMSE, and R² for each tube line on the test set.
@@ -27,6 +25,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from config import get_config
 from data import load_data, get_train_test_split
 from features import engineer_features, prepare_features_for_model
+from utils import get_latest_run_id
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,9 +33,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Results are reported against this published baseline so the reader can
-# immediately identify which lines beat or miss the overall target.
-OVERALL_BASELINE_MAE = 2.01
+# This is loaded dynamically in run() from all_metrics.json; the constant
+# below is a fallback used only when no artifacts are present (e.g. CI preview).
+_FALLBACK_OVERALL_MAE = 2.01
 
 # Each note captures the structural characteristic that drives prediction
 # difficulty, as documented in TfL reports and academic literature.
@@ -71,9 +70,25 @@ def run() -> None:
     logger.info("Train rows: %d | Test rows: %d", len(train_df), len(test_df))
 
     # --- Load the saved model ---
-    model_path = ROOT / "artifacts" / "run_20260210_153030" / "best_model.pkl"
+    run_id = get_latest_run_id(ROOT / "artifacts")
+    if run_id is None:
+        raise FileNotFoundError("No trained model found in artifacts/. Run train.py first.")
+    model_path = ROOT / "artifacts" / run_id / "best_model.pkl"
     model = joblib.load(model_path)
     logger.info("Loaded model from %s", model_path)
+
+    # Load overall MAE dynamically from saved metrics so the chart reference
+    # line stays accurate after retraining (avoids stale hardcoded constant).
+    import json as _json
+    _metrics_path = ROOT / "artifacts" / run_id / "all_metrics.json"
+    try:
+        with open(_metrics_path) as _mf:
+            _all_metrics = _json.load(_mf)
+        overall_baseline_mae = _all_metrics.get('best', {}).get('test_mae', _FALLBACK_OVERALL_MAE)
+    except Exception as _exc:
+        logger.warning("Could not load metrics from %s: %s — using fallback", _metrics_path, _exc)
+        overall_baseline_mae = _FALLBACK_OVERALL_MAE
+    logger.info("Overall test MAE reference: %.3f", overall_baseline_mae)
 
     # The feature list is recovered by inspecting the saved model's
     # ColumnTransformer rather than hard-coding column names.
@@ -140,7 +155,7 @@ def run() -> None:
     # Bars below the overall MAE are coloured blue; those above are red,
     # providing an immediate visual signal of which lines underperform.
     colours = [
-        "#d62728" if mae > OVERALL_BASELINE_MAE else "#1f77b4"
+        "#d62728" if mae > overall_baseline_mae else "#1f77b4"
         for mae in results["mae"]
     ]
     bars = ax.barh(results["line"], results["mae"], color=colours, edgecolor="white")
@@ -152,12 +167,12 @@ def run() -> None:
         )
 
     ax.axvline(
-        OVERALL_BASELINE_MAE, color="black", linestyle="--", linewidth=1.5,
-        label=f"Overall MAE ({OVERALL_BASELINE_MAE} min)",
+        overall_baseline_mae, color="black", linestyle="--", linewidth=1.5,
+        label=f"Overall MAE ({overall_baseline_mae} min)",
     )
 
     ax.set_xlabel("Mean Absolute Error (minutes)")
-    ax.set_title("Per-Line MAE on Test Set — LightGBM (run_20260210_153030)")
+    ax.set_title(f"Per-Line MAE on Test Set — LightGBM ({run_id})")
     ax.legend(loc="lower right")
     plt.tight_layout()
 

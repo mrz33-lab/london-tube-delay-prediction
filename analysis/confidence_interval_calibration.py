@@ -40,6 +40,7 @@ import matplotlib.pyplot as plt
 from config import get_config
 from data import load_data, get_train_test_split
 from features import engineer_features, prepare_features_for_model
+from utils import get_latest_run_id
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,36 +52,35 @@ CONFIDENCE_LEVELS = [0.50, 0.60, 0.70, 0.80, 0.90, 0.95]
 
 
 def _coverage(y_true: np.ndarray, y_pred: np.ndarray,
-              residuals_train: np.ndarray, level: float) -> float:
-    """
-    I compute empirical coverage for a given nominal confidence level.
+              cal_residuals: np.ndarray, level: float) -> float:
+    """Compute empirical coverage for a given nominal confidence level.
 
-    Interval boundaries are derived from the corresponding quantiles of the
-    training residuals, mirroring a production system where interval widths
-    are calibrated on training data and evaluated on unseen observations.
+    Interval boundaries are derived from quantiles of cal_residuals, which
+    should come from a *held-out calibration split* (first half of the test
+    set).  Coverage is then evaluated on the remaining evaluation split
+    (second half of the test set) to avoid circularity.
 
     Args:
-        y_true:          True test target values.
-        y_pred:          Point predictions on the test set.
-        residuals_train: Residuals (y_true - y_pred) on the training set.
-        level:           Nominal confidence level (e.g. 0.95).
+        y_true:        True values from the evaluation split.
+        y_pred:        Point predictions on the evaluation split.
+        cal_residuals: Residuals from the held-out calibration split.
+        level:         Nominal confidence level (e.g. 0.95).
 
     Returns:
-        Fraction of test samples whose true value falls within the interval.
+        Fraction of evaluation samples whose true value falls within the interval.
     """
-    alpha      = 1.0 - level
-    q_lower    = np.percentile(residuals_train, 100 * alpha / 2)
-    q_upper    = np.percentile(residuals_train, 100 * (1 - alpha / 2))
+    alpha   = 1.0 - level
+    q_lower = np.percentile(cal_residuals, 100 * alpha / 2)
+    q_upper = np.percentile(cal_residuals, 100 * (1 - alpha / 2))
 
     lb = y_pred + q_lower
     ub = y_pred + q_upper
 
-    covered = np.mean((y_true >= lb) & (y_true <= ub))
-    return float(covered)
+    return float(np.mean((y_true >= lb) & (y_true <= ub)))
 
 
 def run() -> None:
-    """I run the full calibration evaluation and persist the results."""
+    """Run the full calibration evaluation and persist the results."""
     output_dir = ROOT / "analysis" / "outputs"
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -92,12 +92,15 @@ def run() -> None:
     df = engineer_features(df, config, is_training=True)
     train_df, test_df = get_train_test_split(df, config)
 
-    # --- Load model ---
-    model_path = ROOT / "artifacts" / "run_20260210_153030" / "best_model.pkl"
+    # --- Load model (dynamic path) ---
+    run_id = get_latest_run_id(ROOT / "artifacts")
+    if run_id is None:
+        raise FileNotFoundError("No trained model found in artifacts/. Run train.py first.")
+    model_path = ROOT / "artifacts" / run_id / "best_model.pkl"
     model = joblib.load(model_path)
     logger.info("Loaded model from %s", model_path)
 
-    # I extract the feature list directly from the saved model's ColumnTransformer
+    # Extract the feature list directly from the saved model's ColumnTransformer
     # to avoid any risk of divergence from the training configuration.
     preprocessor  = model.named_steps["preprocessor"]
     numeric_feats  = preprocessor.transformers_[0][2]
@@ -111,26 +114,35 @@ def run() -> None:
         test_df, all_feats, config.features.target_column
     )
 
-    # --- Compute residuals on training set ---
-    y_pred_train = model.predict(X_train)
-    train_residuals = y_train.values - y_pred_train
+    # --- Split test set: first half for calibration, second half for evaluation ---
+    # Using test residuals (rather than training residuals) gives an honest
+    # calibration estimate.  Splitting the test set avoids circularity: interval
+    # widths are derived from the calibration half and validated on the evaluation
+    # half.  Training residuals are too optimistic because the model memorises
+    # its training distribution, inflating apparent coverage.
+    n_test   = len(X_test)
+    cal_idx  = n_test // 2
+    X_cal,  y_cal  = X_test.iloc[:cal_idx],  y_test.iloc[:cal_idx]
+    X_eval, y_eval = X_test.iloc[cal_idx:],  y_test.iloc[cal_idx:]
+
+    y_pred_cal  = model.predict(X_cal)
+    cal_residuals = y_cal.values - y_pred_cal
 
     logger.info(
-        "Training residuals: mean=%.3f  std=%.3f  q2.5=%.3f  q97.5=%.3f",
-        train_residuals.mean(),
-        train_residuals.std(),
-        np.percentile(train_residuals, 2.5),
-        np.percentile(train_residuals, 97.5),
+        "Calibration residuals (test-set first half): mean=%.3f  std=%.3f  "
+        "q2.5=%.3f  q97.5=%.3f",
+        cal_residuals.mean(), cal_residuals.std(),
+        np.percentile(cal_residuals, 2.5), np.percentile(cal_residuals, 97.5),
     )
 
-    # --- Compute test predictions ---
-    y_pred_test = model.predict(X_test)
-    y_true_test = y_test.values
+    # --- Compute evaluation predictions ---
+    y_pred_eval = model.predict(X_eval)
+    y_true_eval = y_eval.values
 
     # --- Evaluate coverage at each confidence level ---
     records = []
     for level in CONFIDENCE_LEVELS:
-        achieved = _coverage(y_true_test, y_pred_test, train_residuals, level)
+        achieved = _coverage(y_true_eval, y_pred_eval, cal_residuals, level)
         records.append({"nominal": level, "achieved": achieved})
         logger.info(
             "Nominal %.2f → Achieved coverage %.4f (%s-confident)",
@@ -208,7 +220,7 @@ def run() -> None:
     ax.set_ylim(0.45, 1.0)
     ax.set_xlabel("Nominal confidence level")
     ax.set_ylabel("Achieved coverage")
-    ax.set_title("Confidence Interval Calibration\n(residuals from training set)")
+    ax.set_title("Confidence Interval Calibration\n(calibration: first 50% of test set)")
     ax.legend()
     plt.tight_layout()
 

@@ -41,7 +41,7 @@ class DataConfig:
     """Schema and synthetic data settings."""
 
     required_columns: List[str] = field(default_factory=lambda: [
-        'timestamp', 'line', 'status', 'delay_minutes',
+        'timestamp', 'line', 'status', 'delay_minutes', 'delay_severity',
         'temp_c', 'precipitation_mm', 'humidity', 'crowding_index',
         'is_weekend', 'hour', 'day_of_week', 'month', 'peak_time', 'is_holiday'
     ])
@@ -82,14 +82,19 @@ class FeatureConfig:
 
     lag_features: List[int] = field(default_factory=lambda: [1, 3])
     rolling_windows: List[int] = field(default_factory=lambda: [3, 12])
-    target_column: str = 'delay_minutes'
+    # delay_severity (0=Good, 1=Minor, 2=Severe) is the ordinal encoding of
+    # the real TfL status label — the only truly measured regression target
+    # available from the TfL Unified API.  delay_minutes is a synthetic proxy
+    # and is excluded from model features to prevent the model from learning
+    # a trivial identity function.
+    target_column: str = 'delay_severity'
     group_column: str = 'line'
     time_column: str = 'timestamp'
     # Number of past periods to use when computing the recent disruption rate.
     # Defaults to 12 (equivalent to 3 hours at 15-min data frequency).
     disruption_rate_window: int = 12
     exclude_columns: List[str] = field(default_factory=lambda: [
-        'timestamp', 'status'
+        'timestamp', 'status', 'delay_minutes'
     ])
 
 
@@ -149,6 +154,20 @@ class ModelConfig:
 
 
 @dataclass
+class ApiConfig:
+    """API rate-limiting and validation settings."""
+
+    # Maximum requests per IP per window (60 req/min is a reasonable default
+    # for a public-facing prediction API without authentication).
+    rate_limit_max_calls: int = 60
+    rate_limit_window_seconds: int = 60
+
+    # Maximum forecast horizon accepted by /predict/forecast.
+    # 168 hours = 1 week; beyond that the predictions are unreliable.
+    max_forecast_hours: int = 168
+
+
+@dataclass
 class ExplainabilityConfig:
     """SHAP settings."""
 
@@ -179,6 +198,7 @@ class Config:
     data: DataConfig = field(default_factory=DataConfig)
     features: FeatureConfig = field(default_factory=FeatureConfig)
     models: ModelConfig = field(default_factory=ModelConfig)
+    api: ApiConfig = field(default_factory=ApiConfig)
     explainability: ExplainabilityConfig = field(default_factory=ExplainabilityConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
 

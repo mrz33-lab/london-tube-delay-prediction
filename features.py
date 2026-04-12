@@ -15,6 +15,7 @@ import joblib
 from pathlib import Path
 
 from config import Config
+from events import get_event_features
 from line_metadata import (
     LINE_LENGTH_KM,
     LINE_N_STATIONS,
@@ -106,17 +107,36 @@ def engineer_features(
 
     # === INTERACTION FEATURES ===
     df['crowding_x_peak']      = df['crowding_index'] * df['peak_time']
+    # precipitation_x_temp: high precipitation at low temperatures has the
+    # largest impact (ice/snow risk).  The (|temp| + 1) denominator amplifies
+    # the interaction near 0°C and suppresses it at high temperatures where
+    # rain has less operational impact.
     df['precipitation_x_temp'] = df['precipitation_mm'] * (1 / (df['temp_c'].abs() + 1))
     logger.info("Created interaction features")
 
     # === EXTRA FEATURE GROUPS ===
     df = add_network_effect_features(df, config)
-    df = add_special_event_features(df)
+    df = add_temporal_encoding_features(df)
     df = add_topology_features(df)
     df = add_train_frequency_features(df)
 
+    # === EVENT FEATURES ===
+    # is_major_event, event_crowd_boost, seasonal_demand_factor from events.py.
+    # These are computed from a procedural calendar so they carry no future
+    # information and require no shift().
+    event_feats = get_event_features(
+        timestamps=df[config.features.time_column],
+        lines=df[config.features.group_column],
+    )
+    df = df.join(event_feats, how='left')
+    df[['is_major_event', 'event_crowd_boost', 'seasonal_demand_factor']] = (
+        df[['is_major_event', 'event_crowd_boost', 'seasonal_demand_factor']].fillna(0)
+    )
+    logger.info("Created event features (is_major_event, event_crowd_boost, seasonal_demand_factor)")
+
     # === LEAKAGE CHECK ===
-    _verify_no_leakage(df, config)
+    if is_training:
+        _verify_no_leakage(df, config)
 
     nan_counts = df.isna().sum()
     features_with_nan = nan_counts[nan_counts > 0]
@@ -210,7 +230,7 @@ def add_network_effect_features(df: pd.DataFrame, config: Config) -> pd.DataFram
 # temporal / event features
 # ---------------------------------------------------------------------------
 
-def add_special_event_features(df: pd.DataFrame) -> pd.DataFrame:
+def add_temporal_encoding_features(df: pd.DataFrame) -> pd.DataFrame:
     """Cyclical hour encoding + service window flags."""
     hour = df['hour']
     df['hour_sin']         = np.sin(2 * np.pi * hour / 24)
@@ -344,7 +364,17 @@ def save_feature_metadata(
     categorical_features: List[str],
     output_dir: Path,
     residual_quantiles: Optional[dict] = None,
+    network_feature_means: Optional[dict] = None,
+    conformal_cal_scores: Optional[np.ndarray] = None,
 ) -> None:
+    """Persist feature metadata alongside optional calibration artefacts.
+
+    conformal_cal_scores: non-conformity scores |y_true - y_pred| from the
+        held-out calibration split.  Stored as a plain Python list so the
+        array survives pickle round-trips across numpy versions.  Used by
+        FutureDelayPredictor._get_confidence_interval() to build
+        distribution-free split-conformal prediction intervals.
+    """
     metadata = {
         'numeric_features': numeric_features,
         'categorical_features': categorical_features,
@@ -352,6 +382,11 @@ def save_feature_metadata(
     }
     if residual_quantiles is not None:
         metadata['residual_quantiles'] = residual_quantiles
+    if network_feature_means is not None:
+        metadata['network_feature_means'] = network_feature_means
+    if conformal_cal_scores is not None:
+        # Store as list: avoids numpy version incompatibilities in joblib pickles
+        metadata['conformal_cal_scores'] = conformal_cal_scores.tolist()
     joblib.dump(metadata, output_dir / 'feature_metadata.pkl')
     logger.info(f"Saved feature metadata to {output_dir}")
 
@@ -371,9 +406,31 @@ def prepare_features_for_model(
     X = df_clean[feature_columns].copy()
     y = df_clean[target_column].copy()
 
-    # 0 for numeric = "no historical data available"
     numeric_cols = X.select_dtypes(include=[np.number]).columns
-    X[numeric_cols] = X[numeric_cols].fillna(0)
+
+    # Lag/rolling/delta/network features legitimately start as NaN at the
+    # beginning of each line's series or when history is unavailable.
+    # Fill these with 0 (= "no prior history").
+    # For all other numeric columns (weather readings, static flags), NaN
+    # indicates a data-quality gap — fill with the column median so we don't
+    # inject a semantically wrong value (e.g. 0 °C for temperature).
+    #
+    # IMPORTANT: only list prefixes whose NaN means "no prior history", NOT
+    # "missing measurement".  Do not add prefixes for features that have a
+    # meaningful non-zero expected value (e.g. a future crowding_demand_lag
+    # feature should use median fill, not zero).
+    _temporal_prefixes = (
+        'lag_', 'rolling_', 'recent_disruption_rate',
+        'temp_delta_1h', 'precipitation_delta_1h',
+        'network_avg_delay', 'network_delay_volatility',
+        'lines_disrupted_ratio', 'is_network_wide_disruption',
+    )
+    for col in numeric_cols:
+        if X[col].isna().any():
+            if any(col.startswith(p) or col == p for p in _temporal_prefixes):
+                X[col] = X[col].fillna(0)
+            else:
+                X[col] = X[col].fillna(X[col].median())
 
     categorical_cols = X.select_dtypes(include=['object', 'category']).columns
     X[categorical_cols] = X[categorical_cols].fillna('Unknown')

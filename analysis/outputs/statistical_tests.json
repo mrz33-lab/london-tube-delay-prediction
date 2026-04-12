@@ -1,0 +1,38 @@
+[
+  {
+    "comparison": "naive vs ridge",
+    "model_A": "naive",
+    "model_B": "ridge",
+    "mae_A": 0.5311,
+    "mae_B": 0.1862,
+    "wilcoxon_stat": 11233822.0,
+    "p_value": 0.788694,
+    "effect_size_r": 0.0113,
+    "significant_0.05": false,
+    "conclusion": "no significant difference between naive and ridge (p=0.7887)"
+  },
+  {
+    "comparison": "naive vs best",
+    "model_A": "naive",
+    "model_B": "best",
+    "mae_A": 0.5311,
+    "mae_B": 0.1193,
+    "wilcoxon_stat": 11387186.5,
+    "p_value": 0.437267,
+    "effect_size_r": -0.0022,
+    "significant_0.05": false,
+    "conclusion": "no significant difference between naive and best (p=0.4373)"
+  },
+  {
+    "comparison": "ridge vs best",
+    "model_A": "ridge",
+    "model_B": "best",
+    "mae_A": 0.1862,
+    "mae_B": 0.1193,
+    "wilcoxon_stat": 19205660.0,
+    "p_value": 0.0,
+    "effect_size_r": -0.6903,
+    "significant_0.05": true,
+    "conclusion": "best significantly outperforms ridge (p=0.0000, r=-0.690)"
+  }
+]

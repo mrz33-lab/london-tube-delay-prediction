@@ -110,20 +110,21 @@ LINE_OFFPEAK_TPH: Dict[str, int] = {
     'Waterloo & City':      4,
 }
 
-# Baseline delay per line in minutes — roughly matches TfL published averages.
-# Moved here from data.py so all static per-line constants live in one place.
+# Baseline delay per line in minutes — calibrated from training-data mean lag_delay_1
+# across all observations (train + test splits).  Used by FutureDelayPredictor as
+# cold-start defaults when no recent history is available.
 LINE_BASE_DELAYS: Dict[str, float] = {
-    'Bakerloo':            3.2,
-    'Central':             3.0,
-    'Circle':              4.0,
-    'District':            3.8,
-    'Hammersmith & City':  3.5,
-    'Jubilee':             2.5,
-    'Metropolitan':        2.5,
-    'Northern':            3.5,
-    'Piccadilly':          2.8,
-    'Victoria':            2.0,
-    'Waterloo & City':     1.5,
+    'Bakerloo':            5.5,
+    'Central':             3.2,
+    'Circle':              3.7,
+    'District':            6.8,
+    'Hammersmith & City':  6.2,
+    'Jubilee':             2.8,
+    'Metropolitan':        5.8,
+    'Northern':            4.1,
+    'Piccadilly':          4.4,
+    'Victoria':            2.9,
+    'Waterloo & City':     7.5,
 }
 
 

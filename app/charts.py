@@ -40,21 +40,19 @@ def _plotly_layout(fig: go.Figure, title: str = "", dark: bool = False) -> go.Fi
     return fig
 
 
-def delay_to_status(delay_minutes: float) -> str:
-    """Map delay minutes to TfL service status."""
-    if delay_minutes < 2:
+def delay_to_status(severity: float) -> str:
+    """Map predicted delay_severity (0–2 scale) to TfL service status."""
+    if severity < 0.5:
         return "Good Service"
-    elif delay_minutes < 5:
+    elif severity < 1.2:
         return "Minor Delays"
-    elif delay_minutes < 10:
-        return "Moderate Delays"
     else:
         return "Severe Delays"
 
 
-def create_gauge_chart(delay_minutes: float, dark: bool = False) -> go.Figure:
-    """Dial gauge showing predicted delay severity with TfL colour thresholds."""
-    label = delay_to_status(delay_minutes)
+def create_gauge_chart(severity: float, dark: bool = False) -> go.Figure:
+    """Dial gauge showing predicted delay severity (0–2 scale) with TfL colour thresholds."""
+    label = delay_to_status(severity)
     colour = STATUS_COLOURS[label]
 
     paper_bg = "#0d1117" if dark else "#ffffff"
@@ -62,31 +60,30 @@ def create_gauge_chart(delay_minutes: float, dark: bool = False) -> go.Figure:
 
     fig = go.Figure(go.Indicator(
         mode="gauge+number+delta",
-        value=round(delay_minutes, 1),
-        number=dict(suffix=" min", font=dict(size=38, color=font_col)),
-        delta=dict(reference=5, increasing=dict(color="#DC241F"), decreasing=dict(color="#00B140")),
+        value=round(severity, 2),
+        number=dict(font=dict(size=38, color=font_col)),
+        delta=dict(reference=1.2, increasing=dict(color="#DC241F"), decreasing=dict(color="#00B140")),
         gauge=dict(
             axis=dict(
-                range=[0, 20],
+                range=[0, 2],
                 tickwidth=2,
                 tickcolor=font_col,
-                tickvals=[0, 2, 5, 10, 20],
-                ticktext=["0", "2", "5", "10", "20+"],
+                tickvals=[0, 0.5, 1.0, 1.5, 2.0],
+                ticktext=["0", "0.5", "1.0", "1.5", "2.0"],
                 tickfont=dict(size=11),
             ),
             bar=dict(color=colour, thickness=0.65),
             bgcolor="rgba(0,0,0,0)",
             borderwidth=0,
             steps=[
-                dict(range=[0,  2],  color="#e8f8ef"),
-                dict(range=[2,  5],  color="#fff9e6"),
-                dict(range=[5,  10], color="#fff0e0"),
-                dict(range=[10, 20], color="#fce8e8"),
+                dict(range=[0.0,  0.5], color="#e8f8ef"),
+                dict(range=[0.5,  1.2], color="#fff9e6"),
+                dict(range=[1.2,  2.0], color="#fce8e8"),
             ],
             threshold=dict(
                 line=dict(color=colour, width=4),
                 thickness=0.85,
-                value=delay_minutes,
+                value=severity,
             ),
         ),
         title=dict(text=f"<b>{label}</b>", font=dict(size=14, color=colour)),
@@ -107,7 +104,7 @@ def create_forecast_chart(
     model_col: str,
     dark: bool = False,
 ) -> go.Figure:
-    """24-hour forecast chart with Â±1 MAE confidence band."""
+    """24-hour forecast chart with ±1 MAE confidence band."""
     line_df = (
         predictions[predictions["line"] == selected_line]
         .sort_values("timestamp")
@@ -137,21 +134,21 @@ def create_forecast_chart(
         fill="toself",
         fillcolor=rgba_fill,
         line=dict(color="rgba(0,0,0,0)"),
-        name="Â±1 MAE band",
+        name="±1 MAE band",
         hoverinfo="skip",
     ))
 
-    # Actual delays
+    # Actual severity
     fig.add_trace(go.Scatter(
         x=line_df["timestamp"],
         y=line_df["actual"],
         mode="lines",
-        name="Actual Delay",
+        name="Actual Severity",
         line=dict(color="#6c757d", width=1.5, dash="dot"),
-        hovertemplate="<b>Actual</b> %{y:.1f} min @ %{x|%H:%M}<extra></extra>",
+        hovertemplate="<b>Actual</b> %{y:.2f} @ %{x|%H:%M}<extra></extra>",
     ))
 
-    # Predicted delays
+    # Predicted severity
     fig.add_trace(go.Scatter(
         x=line_df["timestamp"],
         y=line_df[model_col],
@@ -159,22 +156,22 @@ def create_forecast_chart(
         name="Predicted",
         line=dict(color=line_colour, width=2.5),
         marker=dict(size=4, color=line_colour),
-        hovertemplate="<b>Predicted</b> %{y:.1f} min @ %{x|%H:%M}<extra></extra>",
+        hovertemplate="<b>Predicted</b> %{y:.2f} @ %{x|%H:%M}<extra></extra>",
     ))
 
-    fig = _plotly_layout(fig, title=f"Delay Forecast â€” {selected_line} Line", dark=dark)
+    fig = _plotly_layout(fig, title=f"Severity Forecast \u2013 {selected_line} Line", dark=dark)
     fig.update_layout(
         height=360,
         hovermode="x unified",
         xaxis=dict(title="Time", tickformat="%H:%M"),
-        yaxis=dict(title="Delay (minutes)"),
+        yaxis=dict(title="Severity (0=Good \u00b7 1=Minor \u00b7 2=Severe)"),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
     return fig
 
 
 def create_line_heatmap(predictions: pd.DataFrame, model_col: str, dark: bool = False) -> go.Figure:
-    """Hour-of-day Ã— tube-line heatmap of average predicted delay."""
+    """Hour-of-day × tube-line heatmap of average predicted delay."""
     if predictions.empty:
         return go.Figure()
 
@@ -198,8 +195,8 @@ def create_line_heatmap(predictions: pd.DataFrame, model_col: str, dark: bool = 
             [0.55, "#FF6600"],
             [1.0,  "#DC241F"],
         ],
-        colorbar=dict(title="Avg Delay (min)", tickfont=dict(color=font_col)),
-        hovertemplate="<b>%{y}</b><br>Hour: %{x}<br>Avg Delay: %{z:.1f} min<extra></extra>",
+        colorbar=dict(title="Avg Severity", tickfont=dict(color=font_col)),
+        hovertemplate="<b>%{y}</b><br>Hour: %{x}<br>Avg Severity: %{z:.2f}<extra></extra>",
     ))
 
     fig.update_layout(
@@ -216,7 +213,7 @@ def create_line_heatmap(predictions: pd.DataFrame, model_col: str, dark: bool = 
 
 
 def create_model_comparison_bar(metrics: Dict, dark: bool = False) -> go.Figure:
-    """Grouped bar chart comparing MAE, RMSE, RÂ² across models."""
+    """Grouped bar chart comparing MAE, RMSE, R² across models."""
     model_names = [k for k in ("naive", "ridge", "best") if k in metrics]
     display_names = {"naive": "Naive Baseline", "ridge": "Ridge Regression", "best": "Best Model"}
     bar_colours   = {"naive": "#6c757d",         "ridge": "#0098D4",           "best": "#003688"}
@@ -227,7 +224,7 @@ def create_model_comparison_bar(metrics: Dict, dark: bool = False) -> go.Figure:
 
     fig = make_subplots(
         rows=1, cols=3,
-        subplot_titles=("Mean Absolute Error (â†“ better)", "RMSE (â†“ better)", "RÂ² Score (â†‘ better)"),
+        subplot_titles=("Mean Absolute Error (lower=better)", "RMSE (lower=better)", "R² Score (higher=better)"),
         shared_yaxes=False,
     )
 
@@ -241,7 +238,7 @@ def create_model_comparison_bar(metrics: Dict, dark: bool = False) -> go.Figure:
                              hovertemplate=f"RMSE: %{{y:.3f}}<extra></extra>",
                              showlegend=False), row=1, col=2)
         fig.add_trace(go.Bar(name=name, x=[name], y=[r2],   marker_color=col,
-                             hovertemplate=f"RÂ²: %{{y:.4f}}<extra></extra>",
+                             hovertemplate=f"R²: %{{y:.4f}}<extra></extra>",
                              showlegend=False), row=1, col=3)
 
     paper_bg = "#0d1117" if dark else "#ffffff"
@@ -308,7 +305,7 @@ def create_error_distribution(predictions: pd.DataFrame, model_col: str, dark: b
         name="Residuals",
         marker_color="#0098D4",
         opacity=0.75,
-        hovertemplate="Error: %{x:.1f} min<br>Count: %{y}<extra></extra>",
+        hovertemplate="Error: %{x:.2f}<br>Count: %{y}<extra></extra>",
     ))
 
     # Simple KDE-like overlay using Plotly's smoothed scatter
@@ -329,7 +326,7 @@ def create_error_distribution(predictions: pd.DataFrame, model_col: str, dark: b
     fig = _plotly_layout(fig, title="Prediction Error Distribution", dark=dark)
     fig.update_layout(
         height=340,
-        xaxis_title="Prediction Error (minutes)",
+        xaxis_title="Prediction Error (severity units)",
         yaxis_title="Count",
         bargap=0.05,
     )
@@ -354,10 +351,10 @@ def create_scatter_actual_vs_pred(predictions: pd.DataFrame, model_col: str, dar
             size=4,
             color=errors,
             colorscale=[[0, "#00B140"], [0.5, "#FFD300"], [1, "#DC241F"]],
-            colorbar=dict(title="Error (min)"),
+            colorbar=dict(title="Error"),
             opacity=0.55,
         ),
-        hovertemplate="Actual: %{x:.1f} min<br>Predicted: %{y:.1f} min<extra></extra>",
+        hovertemplate="Actual: %{x:.2f}<br>Predicted: %{y:.2f}<extra></extra>",
     ))
 
     fig.add_trace(go.Scatter(
@@ -368,21 +365,21 @@ def create_scatter_actual_vs_pred(predictions: pd.DataFrame, model_col: str, dar
         hoverinfo="skip",
     ))
 
-    fig = _plotly_layout(fig, title="Predicted vs Actual Delays", dark=dark)
+    fig = _plotly_layout(fig, title="Predicted vs Actual Severity", dark=dark)
     fig.update_layout(
         height=420,
-        xaxis=dict(title="Actual Delay (min)", range=[0, max_val]),
-        yaxis=dict(title="Predicted Delay (min)", range=[0, max_val]),
+        xaxis=dict(title="Actual Severity", range=[0, max_val]),
+        yaxis=dict(title="Predicted Severity", range=[0, max_val]),
     )
     return fig
 
 
 def create_confusion_matrix_chart(predictions: pd.DataFrame, model_col: str, dark: bool = False) -> go.Figure:
-    """Confusion matrix comparing true vs predicted TfL service statuses."""
+    """Confusion matrix comparing true vs predicted TfL service statuses (from delay_severity)."""
     from sklearn.metrics import confusion_matrix
 
-    labels = ["Good Service", "Minor Delays", "Moderate Delays", "Severe Delays"]
-    
+    labels = ["Good Service", "Minor Delays", "Severe Delays"]
+
     y_true = predictions["actual"].apply(delay_to_status)
     y_pred = predictions[model_col].apply(delay_to_status)
     
@@ -450,9 +447,8 @@ def create_line_perf_bar(predictions: pd.DataFrame, model_col: str, dark: bool =
     )
 
     colours = [
-        STATUS_COLOURS["Severe Delays"]  if v >= 10 else
-        STATUS_COLOURS["Moderate Delays"] if v >= 5  else
-        STATUS_COLOURS["Minor Delays"]   if v >= 2  else
+        STATUS_COLOURS["Severe Delays"] if v >= 0.6 else
+        STATUS_COLOURS["Minor Delays"]  if v >= 0.3 else
         STATUS_COLOURS["Good Service"]
         for v in perf["MAE"]
     ]
@@ -461,14 +457,14 @@ def create_line_perf_bar(predictions: pd.DataFrame, model_col: str, dark: bool =
         x=perf["line"],
         y=perf["MAE"],
         marker_color=colours,
-        hovertemplate="<b>%{x}</b><br>MAE: %{y:.2f} min<extra></extra>",
+        hovertemplate="<b>%{x}</b><br>MAE: %{y:.3f}<extra></extra>",
     ))
 
     fig = _plotly_layout(fig, title="Mean Absolute Error by Tube Line", dark=dark)
     fig.update_layout(
         height=340,
         xaxis_title="",
-        yaxis_title="MAE (minutes)",
+        yaxis_title="MAE (severity units)",
         xaxis_tickangle=-30,
     )
     return fig
@@ -554,21 +550,18 @@ def create_interactive_tube_map(
         "Waterloo & City":    "#95CDBA",
     }
 
-    # ── Delay → display colour ────────────────────────────────────────────
-    def _delay_colour(delay: float, base: str) -> str:
-        if delay < 2:
+    # ── Severity → display colour ────────────────────────────────────────
+    def _delay_colour(severity: float, base: str) -> str:
+        if severity < 0.5:
             return base             # good service → official colour
-        elif delay < 5:
+        elif severity < 1.2:
             return "#FFD300"        # amber
-        elif delay < 10:
-            return "#FF6600"        # orange
         else:
             return "#DC143C"        # red
 
-    def _delay_status(delay: float) -> str:
-        if delay < 2:   return "Good Service"
-        if delay < 5:   return "Minor Delays"
-        if delay < 10:  return "Moderate Delays"
+    def _delay_status(severity: float) -> str:
+        if severity < 0.5:  return "Good Service"
+        if severity < 1.2:  return "Minor Delays"
         return "Severe Delays"
 
     # Build a lookup: line → predicted delay (mean)
@@ -598,7 +591,7 @@ def create_interactive_tube_map(
         hover = (
             f"<b>{line_name} Line</b><br>"
             f"Status: <b>{status}</b><br>"
-            f"Predicted delay: {delay:.1f} min"
+            f"Predicted severity: {delay:.2f}"
         )
 
         fig.add_trace(go.Scatter(
@@ -707,7 +700,7 @@ def create_network_map_figure(
     Parameters
     ----------
     line_delays : dict
-        Mapping of line name → avg delay (minutes).
+        Mapping of line name → avg predicted severity (0–2 scale).
     dark : bool
         Unused (map now always uses the dark TfL night aesthetic).
     highlighted_line : str or None
@@ -765,15 +758,15 @@ def create_sensitivity_chart(
         fillcolor=f"rgba({int(line_colour[1:3],16)},{int(line_colour[3:5],16)},{int(line_colour[5:7],16)},0.08)",
         hovertemplate=(
             f"<b>{feature_name}</b>: %{{x:.1f}}<br>"
-            f"Predicted Delay: %{{y:.2f}} min<extra></extra>"
+            f"Predicted Severity: %{{y:.2f}}<extra></extra>"
         ),
     ))
 
-    fig = _plotly_layout(fig, title=f"Sensitivity — {feature_name} vs Delay ({line_name})", dark=dark)
+    fig = _plotly_layout(fig, title=f"Sensitivity \u2014 {feature_name} vs Severity ({line_name})", dark=dark)
     fig.update_layout(
         height=360,
         xaxis_title=feature_name,
-        yaxis_title="Predicted Delay (min)",
+        yaxis_title="Predicted Severity (0\u20132)",
         hovermode="x unified",
     )
     return fig

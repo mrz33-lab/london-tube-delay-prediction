@@ -12,6 +12,13 @@ import logging
 import os
 import random
 import sys
+
+# Module-level RNG for estimate_crowding / estimate_delay_minutes.
+# Production runs use a freshly seeded (time-based) RNG — each collection
+# cycle gets different jitter, which is the desired behaviour.
+# In unit tests, call _collector_rng.seed(N) before the function under test
+# to get a fully reproducible result.
+_collector_rng: random.Random = random.Random()
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -243,7 +250,7 @@ class RateLimiter:
         elapsed = time.monotonic() - self._last_request_time
         wait_time = self._min_interval - elapsed
         if wait_time > 0:
-            jitter = random.uniform(0, self._min_interval * 0.1)
+            jitter = _collector_rng.uniform(0, self._min_interval * 0.1)
             time.sleep(wait_time + jitter)
         self._last_request_time = time.monotonic()
 
@@ -428,7 +435,7 @@ def estimate_crowding(line, hour, is_weekend, is_holiday) -> float:
     elif is_weekend:
         base *= 0.6
 
-    noise = random.gauss(0, 0.05)
+    noise = _collector_rng.gauss(0, 0.05)
     crowding = base + noise
 
     return round(max(0.0, min(1.0, crowding)), 3)
@@ -436,17 +443,36 @@ def estimate_crowding(line, hour, is_weekend, is_holiday) -> float:
 
 
 def estimate_delay_minutes(normalised_status, precipitation_mm, temp_c) -> float:
-    """Estimate delay from status + weather conditions."""
+    """Operationalise TfL service status as a continuous delay in minutes.
+
+    TfL's Unified API reports categorical service status (Good Service /
+    Minor Delays / Severe Delays).  This function maps each label to a
+    Gaussian distribution via DELAY_ESTIMATES and adds deterministic
+    weather-driven increments, producing a continuous regression target.
+
+    Note: the returned value is a *synthetic proxy*, not a measured delay.
+    The Gaussian draws use _collector_rng so callers can seed it for
+    reproducibility (e.g. in unit tests).  Production runs leave the RNG
+    unseeded so that consecutive snapshots have independent jitter.
+
+    WARNING — SYNTHETIC PROXY:
+    The returned delay is NOT a measured value from TfL. It is a probabilistic
+    estimate derived from TfL's categorical service status. The minimum
+    achievable MAE for predicting this target is bounded below by the noise
+    injected here (Good Service σ=0.5 min, Severe Delays σ=8.0 min). Claims
+    about model performance must be interpreted against this proxy target, not
+    real measured delays.
+    """
     mean, std = DELAY_ESTIMATES.get(normalised_status, (1.0, 0.5))
-    delay = max(0.0, random.gauss(mean, std))
+    delay = max(0.0, _collector_rng.gauss(mean, std))
 
     if precipitation_mm > 10:
-        delay += random.uniform(2.0, 6.0)
+        delay += _collector_rng.uniform(2.0, 6.0)
     elif precipitation_mm > 2:
-        delay += random.uniform(0.5, 2.0)
+        delay += _collector_rng.uniform(0.5, 2.0)
 
     if temp_c < 0 or temp_c > 30:
-        delay += random.uniform(0.5, 2.5)
+        delay += _collector_rng.uniform(0.5, 2.5)
 
     return round(max(0.0, delay), 2)
 
@@ -477,7 +503,7 @@ class DataCollector:
         month = snapshot_time.month
         is_weekend = int(day_of_week >= 5)
         is_holiday = int(snapshot_time.date() in self._uk_holidays)
-        peak_time = int((7 <= hour < 10) or (16 <= hour < 19))
+        peak_time = int(day_of_week < 5 and ((7 <= hour < 10) or (16 <= hour < 19)))
 
         records: List[Dict] = []
         successful_fetches = 0
@@ -491,6 +517,12 @@ class DataCollector:
                     "Skipping %s — TfL status fetch failed", display_name
                 )
                 failed_fetches += 1
+                continue
+
+            if raw_status == "Service Closed":
+                logger.debug(
+                    "Skipping %s — service closed (outside operating hours)", display_name
+                )
                 continue
 
             normalised_status = STATUS_NORMALISATION.get(raw_status, "Good Service")
@@ -520,12 +552,14 @@ class DataCollector:
                 temp_c=weather["temp_c"],
             )
 
+            _severity_map = {"Good Service": 0, "Minor Delays": 1, "Severe Delays": 2}
             records.append(
                 {
                     "timestamp": snapshot_time.isoformat(),
                     "line": display_name,
                     "status": normalised_status,
                     "delay_minutes": delay_minutes,
+                    "delay_severity": _severity_map.get(normalised_status, 0),
                     "temp_c": weather["temp_c"],
                     "precipitation_mm": weather["precipitation_mm"],
                     "humidity": weather["humidity"],
@@ -640,6 +674,10 @@ def run_collection_loop(
 def _configure_logging() -> None:
     log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     date_format = "%Y-%m-%d %H:%M:%S"
+
+    # Ensure the data directory exists before creating the FileHandler —
+    # programmatic callers (e.g. tests) may not have run main() first.
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     logging.basicConfig(
         level=logging.INFO,

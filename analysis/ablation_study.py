@@ -40,6 +40,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from config import get_config, RANDOM_SEED
 from data import load_data, get_train_test_split
 from features import engineer_features, prepare_features_for_model
+from utils import get_latest_run_id
 
 logging.basicConfig(
     level=logging.INFO,
@@ -47,8 +48,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Hyperparameters from the saved model so every ablation uses the same capacity.
-LGBM_PARAMS = dict(
+# Fallback hyperparameters used only when no trained model exists.
+_LGBM_PARAMS_FALLBACK = dict(
     max_depth=7,
     n_estimators=50,
     num_leaves=15,
@@ -59,6 +60,45 @@ LGBM_PARAMS = dict(
     verbosity=-1,
     force_col_wise=True,
 )
+
+_LGBM_KEEP_PARAMS = {
+    "num_leaves", "max_depth", "learning_rate", "n_estimators",
+    "min_child_samples", "subsample", "colsample_bytree",
+    "reg_alpha", "reg_lambda",
+}
+
+
+def _load_lgbm_params() -> dict:
+    """Load best LightGBM hyperparameters from the latest training run.
+
+    Using the Optuna-tuned params rather than fixed values ensures every
+    ablation is evaluated under the same capacity as the full model, so
+    the MAE delta reflects feature contribution alone.  Falls back to
+    _LGBM_PARAMS_FALLBACK when no artifacts are available (e.g. CI).
+    """
+    run_id = get_latest_run_id(ROOT / "artifacts")
+    if run_id is None:
+        logger.warning("No trained model found — using fallback LGBM_PARAMS")
+        return dict(_LGBM_PARAMS_FALLBACK)
+
+    model_path = ROOT / "artifacts" / run_id / "best_model.pkl"
+    try:
+        import joblib as _jl
+        model = _jl.load(model_path)
+        regressor = model.named_steps.get("regressor")
+        if regressor is not None and hasattr(regressor, "get_params"):
+            raw = regressor.get_params()
+            params = {k: v for k, v in raw.items() if k in _LGBM_KEEP_PARAMS}
+            params.update(random_state=RANDOM_SEED, verbosity=-1, force_col_wise=True)
+            logger.info("Loaded LGBM params from %s: %s", run_id, params)
+            return params
+    except Exception as exc:
+        logger.warning("Could not load model params (%s) — using fallback", exc)
+
+    return dict(_LGBM_PARAMS_FALLBACK)
+
+
+LGBM_PARAMS = _load_lgbm_params()
 
 # Features are partitioned into five semantically coherent groups.
 # crowding_index and interaction terms belong to line_metadata because

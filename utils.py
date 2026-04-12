@@ -78,14 +78,21 @@ def load_config_from_yaml(config_path: Path) -> Dict[str, Any]:
         return yaml.safe_load(f)
 
 
+def _coerce_numpy(obj):
+    """Recursively coerce numpy scalars to Python natives for JSON serialisation."""
+    if isinstance(obj, (np.floating, np.integer)):
+        return float(obj)
+    if isinstance(obj, dict):
+        return {k: _coerce_numpy(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_coerce_numpy(i) for i in obj]
+    return obj
+
+
 def save_metrics(metrics: Dict[str, float], output_path: Path):
-    """Save metrics to JSON, converting numpy types."""
-    metrics_clean = {
-        k: float(v) if isinstance(v, (np.floating, np.integer)) else v
-        for k, v in metrics.items()
-    }
+    """Save metrics to JSON, converting numpy types (including nested dicts)."""
     with open(output_path, 'w') as f:
-        json.dump(metrics_clean, f, indent=2)
+        json.dump(_coerce_numpy(metrics), f, indent=2)
 
 
 def load_metrics(metrics_path: Path) -> Dict[str, float]:
@@ -115,7 +122,10 @@ def get_latest_run_id(artifacts_dir: Path) -> Optional[str]:
     run_dirs = [d for d in artifacts_dir.iterdir() if d.is_dir() and d.name.startswith('run_')]
     if not run_dirs:
         return None
-    run_dirs.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+    # Sort by directory name — names are run_YYYYMMDD_HHMMSS so lexicographic
+    # order is chronological. Name-based sort is deterministic across platforms;
+    # mtime is unreliable when multiple runs are created within the same second.
+    run_dirs.sort(key=lambda x: x.name, reverse=True)
     return run_dirs[0].name
 
 
@@ -151,6 +161,23 @@ def check_data_leakage(df, feature_col, time_col='timestamp', group_col=None):
     return True
 
 
+# Explicit prefix list for features that are computed via shift/rolling and are
+# therefore expected to start with NaN.  Using startswith() rather than substring
+# search prevents false positives: a feature named "flag_route" or "catalogue_id"
+# contains the string "lag" but is NOT a temporal lag feature.
+_TEMPORAL_FEATURE_PREFIXES: tuple = (
+    'lag_',
+    'rolling_',
+    'recent_disruption_rate',
+    'temp_delta_1h',
+    'precipitation_delta_1h',
+    'network_avg_delay',
+    'network_delay_volatility',
+    'lines_disrupted_ratio',
+    'is_network_wide_disruption',
+)
+
+
 def _check_temporal_order(df, feature_col, time_col):
     non_null_mask = df[feature_col].notna()
     if non_null_mask.sum() == 0:
@@ -158,11 +185,14 @@ def _check_temporal_order(df, feature_col, time_col):
 
     first_non_null_idx = non_null_mask.idxmax()
     first_idx = df.index[0]
-    
-    is_lagged = any(k in feature_col for k in ['lag', 'rolling', 'recent'])
+
+    is_lagged = any(
+        feature_col.startswith(p) or feature_col == p
+        for p in _TEMPORAL_FEATURE_PREFIXES
+    )
     if is_lagged and first_non_null_idx == first_idx:
         return False
-        
+
     return True
 
 
@@ -188,6 +218,14 @@ def safe_divide(numerator, denominator, default=0.0):
         return default
 
 
+def _mape(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """Mean Absolute Percentage Error, excluding near-zero actuals (< 0.1 min)."""
+    mask = np.abs(y_true) > 0.1
+    if not mask.any():
+        return float('nan')
+    return float(np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask])) * 100)
+
+
 def evaluate_model(
     model,
     X_train: pd.DataFrame,
@@ -195,14 +233,14 @@ def evaluate_model(
     X_test: pd.DataFrame,
     y_test: pd.Series,
 ) -> Dict[str, float]:
-    """Compute MAE, RMSE, and R² on both the train and test splits.
+    """Compute MAE, RMSE, R², and MAPE on both the train and test splits.
 
     Extracted from train.py so that every model function uses the same
     metric computation logic — no more copy-paste drift between trainers.
 
     Returns a dict with keys:
-        train_mae, train_rmse, train_r2,
-        test_mae,  test_rmse,  test_r2
+        train_mae, train_rmse, train_r2, train_mape,
+        test_mae,  test_rmse,  test_r2,  test_mape
     """
     from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
@@ -213,7 +251,9 @@ def evaluate_model(
         'train_mae':  mean_absolute_error(y_train, y_pred_train),
         'train_rmse': float(np.sqrt(mean_squared_error(y_train, y_pred_train))),
         'train_r2':   r2_score(y_train, y_pred_train),
+        'train_mape': _mape(np.array(y_train), y_pred_train),
         'test_mae':   mean_absolute_error(y_test, y_pred_test),
         'test_rmse':  float(np.sqrt(mean_squared_error(y_test, y_pred_test))),
         'test_r2':    r2_score(y_test, y_pred_test),
+        'test_mape':  _mape(np.array(y_test), y_pred_test),
     }

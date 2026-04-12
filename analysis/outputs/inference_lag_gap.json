@@ -1,0 +1,86 @@
+{
+  "artifact_dir": "C:\\Users\\marwan\\Desktop\\FinalYearProject\\london-tube-delay-prediction\\artifacts\\run_20260412_212949",
+  "overall": {
+    "mae_history": 0.1193,
+    "mae_cold_start": 1.3176,
+    "delta": 1.1983,
+    "delta_pct": 1004.39,
+    "n_samples": 6741
+  },
+  "per_line": {
+    "Bakerloo": {
+      "mae_history": 0.1298,
+      "mae_cold_start": 0.9422,
+      "delta": 0.8124,
+      "n_samples": 613
+    },
+    "Central": {
+      "mae_history": 0.1073,
+      "mae_cold_start": 1.4682,
+      "delta": 1.3609,
+      "n_samples": 613
+    },
+    "Circle": {
+      "mae_history": 0.0827,
+      "mae_cold_start": 1.6278,
+      "delta": 1.5452,
+      "n_samples": 612
+    },
+    "District": {
+      "mae_history": 0.1851,
+      "mae_cold_start": 0.9469,
+      "delta": 0.7618,
+      "n_samples": 612
+    },
+    "Hammersmith & City": {
+      "mae_history": 0.1113,
+      "mae_cold_start": 1.0006,
+      "delta": 0.8893,
+      "n_samples": 613
+    },
+    "Jubilee": {
+      "mae_history": 0.1453,
+      "mae_cold_start": 1.5118,
+      "delta": 1.3665,
+      "n_samples": 613
+    },
+    "Metropolitan": {
+      "mae_history": 0.2229,
+      "mae_cold_start": 1.4137,
+      "delta": 1.1908,
+      "n_samples": 613
+    },
+    "Northern": {
+      "mae_history": 0.09,
+      "mae_cold_start": 1.5056,
+      "delta": 1.4156,
+      "n_samples": 613
+    },
+    "Piccadilly": {
+      "mae_history": 0.1301,
+      "mae_cold_start": 1.5634,
+      "delta": 1.4334,
+      "n_samples": 613
+    },
+    "Victoria": {
+      "mae_history": 0.0349,
+      "mae_cold_start": 1.6724,
+      "delta": 1.6375,
+      "n_samples": 613
+    },
+    "Waterloo & City": {
+      "mae_history": 0.0731,
+      "mae_cold_start": 0.841,
+      "delta": 0.7679,
+      "n_samples": 613
+    }
+  },
+  "cold_start_features_replaced": [
+    "lag_delay_1",
+    "lag_delay_3",
+    "rolling_mean_delay_3",
+    "rolling_mean_delay_12",
+    "rolling_std_delay_12",
+    "recent_disruption_rate"
+  ]
+}

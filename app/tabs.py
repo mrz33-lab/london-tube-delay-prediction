@@ -603,9 +603,8 @@ def render_tube_map(line_delays: Dict[str, float], ts_label: str, dark: bool) ->
     Clicking a line in the legend isolates it (all others hide).
     """
     def _delay_status(d: float) -> str:
-        if d < 2:   return "Good Service"
-        if d < 5:   return "Minor Delays"
-        if d < 10:  return "Moderate Delays"
+        if d < 0.5:  return "Good Service"
+        if d < 1.2:  return "Minor Delays"
         return "Severe Delays"
 
     seqs       = _tm_line_sequences()
@@ -657,7 +656,7 @@ def render_tube_map(line_delays: Dict[str, float], ts_label: str, dark: bool) ->
             f"Lines: {lines_str}<br>"
             f"Zone: {zone}<br>"
             f"Status: {status}<br>"
-            f"Predicted delay: {avg_delay:.1f} min"
+            f"Predicted severity: {avg_delay:.2f}"
         )
 
         if len(served) >= 2:
@@ -737,7 +736,7 @@ def render_tube_map(line_delays: Dict[str, float], ts_label: str, dark: bool) ->
                 f"Lines: {lines_str}<br>"
                 f"Zone: {zone}<br>"
                 f"Status: {status}<br>"
-                f"Predicted delay: {avg_delay:.1f} min"
+                f"Predicted severity: {avg_delay:.2f}"
             )
             lx.append(sx);  ly.append(sy)
             lt.append(st_name);  lpos.append(_label_pos[st_name])
@@ -818,14 +817,12 @@ def render_tube_map(line_delays: Dict[str, float], ts_label: str, dark: bool) ->
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _status_for_delay(delay: float):
-    """Return (colour, label) for a delay value in minutes."""
-    if delay < 2:
+def _status_for_delay(severity: float):
+    """Return (colour, label) for a predicted delay_severity value (0–2 scale)."""
+    if severity < 0.5:
         return "#00B140", "Good Service"
-    elif delay < 5:
+    elif severity < 1.2:
         return "#FFD300", "Minor Delays"
-    elif delay < 10:
-        return "#FF6600", "Moderate Delays"
     else:
         return "#DC241F", "Severe Delays"
 
@@ -891,15 +888,15 @@ def render_live_overview_tab(
 
     k1, k2, k3, k4 = st.columns(4)
     with k1:
-        st.metric("Test MAE", f"{mae:.2f} min",
+        st.metric("Test MAE", f"{mae:.3f} sev",
                   delta=f"{-impr:.1f}% vs Naive", delta_color="inverse")
     with k2:
-        st.metric("Test RMSE", f"{rmse:.2f} min")
+        st.metric("Test RMSE", f"{rmse:.3f} sev")
     with k3:
         st.metric("R² Score", f"{r2:.3f}")
     with k4:
         avg_delay = float(line_df["actual"].mean()) if not line_df.empty else 0.0
-        st.metric(f"{selected_line} Avg Delay", f"{avg_delay:.1f} min")
+        st.metric(f"{selected_line} Avg Severity", f"{avg_delay:.2f}")
 
     st.markdown("<hr class='section-divider'>", unsafe_allow_html=True)
 
@@ -936,9 +933,9 @@ def render_live_overview_tab(
             Snapshot: <span style="color:{muted}; font-weight:400;">{ts_label}</span>
         </span>
         <span style="font-weight:600; font-size:0.88rem; color:{text_col};">
-            Lines with delays (&ge;5 min):
+            Lines with severe predicted severity (&ge;1.2):
             <span style="color:#DC241F; font-weight:700;">
-                {sum(1 for v in line_delays.values() if v >= 5)}
+                {sum(1 for v in line_delays.values() if v >= 1.2)}
             </span>
         </span>
     </div>
@@ -946,17 +943,16 @@ def render_live_overview_tab(
 
     render_tube_map(line_delays, ts_label, dark)
 
-    # Status count cards row (4 statuses)
+    # Status count cards row (3 severity levels)
     statuses = [
-        ("Good Service",     "#00B140", sum(1 for v in line_delays.values() if v < 2)),
-        ("Minor Delays",     "#FFD300", sum(1 for v in line_delays.values() if 2 <= v < 5)),
-        ("Moderate Delays",  "#FF6600", sum(1 for v in line_delays.values() if 5 <= v < 10)),
-        ("Severe Delays",    "#DC241F", sum(1 for v in line_delays.values() if v >= 10)),
+        ("Good Service",  "#00B140", sum(1 for v in line_delays.values() if v < 0.5)),
+        ("Minor Delays",  "#FFD300", sum(1 for v in line_delays.values() if 0.5 <= v < 1.2)),
+        ("Severe Delays", "#DC241F", sum(1 for v in line_delays.values() if v >= 1.2)),
     ]
     card_bg  = "#111827" if dark else "#ffffff"
     card_bdr = "#1f2937" if dark else "#e5e7eb"
     muted2   = "#8b949e" if dark else "#6b7280"
-    cols = st.columns(4)
+    cols = st.columns(3)
     for i, (label, colour, count) in enumerate(statuses):
         with cols[i]:
             st.markdown(f"""
@@ -971,7 +967,7 @@ def render_live_overview_tab(
     st.markdown("<hr class='section-divider'>", unsafe_allow_html=True)
 
     # ── Selected Line Forecast ────────────────────────────────────────────────
-    st.markdown(f"### {selected_line} Line — 24-Hour Forecast")
+    st.markdown(f"### {selected_line} Line — Prediction History")
 
     pred_col, gauge_col = st.columns([2, 1])
 
@@ -1007,20 +1003,20 @@ def render_live_overview_tab(
         else:
             c1, c2 = st.columns(2)
             with c1:
-                st.markdown("**Actual Delays**")
+                st.markdown("**Actual Severity**")
                 s = line_df["actual"]
                 st.table(pd.DataFrame({
                     "Metric": ["Mean", "Median", "Std Dev", "Min", "Max"],
-                    "Value":  [f"{s.mean():.2f} min", f"{s.median():.2f} min",
-                               f"{s.std():.2f} min",  f"{s.min():.2f} min", f"{s.max():.2f} min"],
+                    "Value":  [f"{s.mean():.3f}", f"{s.median():.3f}",
+                               f"{s.std():.3f}",  f"{s.min():.0f}", f"{s.max():.0f}"],
                 }))
             with c2:
-                st.markdown(f"**Predicted Delays ({model_choice})**")
+                st.markdown(f"**Predicted Severity ({model_choice})**")
                 p = line_df[model_col]
                 st.table(pd.DataFrame({
                     "Metric": ["Mean", "Median", "Std Dev", "Min", "Max"],
-                    "Value":  [f"{p.mean():.2f} min", f"{p.median():.2f} min",
-                               f"{p.std():.2f} min",  f"{p.min():.2f} min", f"{p.max():.2f} min"],
+                    "Value":  [f"{p.mean():.3f}", f"{p.median():.3f}",
+                               f"{p.std():.3f}",  f"{p.min():.2f}", f"{p.max():.2f}"],
                 }))
 
     # ── Hour-of-day heatmap (collapsed) ──────────────────────────────────────
@@ -1053,8 +1049,8 @@ def render_simulator_tab(artifacts: Dict, selected_line: str, model_col: str, da
 
     st.markdown("### Scenario Simulator")
     st.caption(
-        "Adjust the sliders below to explore how different conditions affect predicted delay. "
-        "Uses the trained feature distributions as baselines."
+        "Adjust the sliders below to explore how different conditions affect predicted delay severity (0–2 scale: "
+        "0=Good Service, 1=Minor Delays, 2=Severe Delays). Uses the trained feature distributions as baselines."
     )
 
     line_df = test_preds[test_preds["line"] == selected_line]
@@ -1080,24 +1076,62 @@ def render_simulator_tab(artifacts: Dict, selected_line: str, model_col: str, da
 
     st.markdown("<hr class='section-divider'>", unsafe_allow_html=True)
 
-    # ── Estimate baseline delay from test data ────────────────────────────────
-    # Filter to the chosen hour/peak conditions as a rough analogue
+    # ── Compute baseline from test data (used as fallback + for sensitivity sweeps) ──
     mask = line_df["timestamp"].dt.hour == hour
     if is_peak:
         mask &= line_df[model_col] > line_df[model_col].median()
     sim_base = float(line_df.loc[mask, model_col].mean()) if mask.any() else float(line_df[model_col].mean())
 
-    # Apply simple heuristic deltas on top of the data-driven baseline
+    # ── Try real model prediction via the FastAPI service ────────────────────
+    # Build a target_datetime that falls on the chosen hour.  If that hour has
+    # already passed today, use tomorrow so the API's "must be in future" guard
+    # is satisfied.
+    import requests as _requests
+    from datetime import date as _date
+
+    api_url = "http://localhost:8000"
+
+    now = datetime.now()
+    target_candidate = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+    if target_candidate <= now:
+        target_candidate += timedelta(days=1)
+
+    payload = {
+        "line": selected_line,
+        "target_datetime": target_candidate.isoformat(),
+        "weather_forecast": {
+            "temperature": float(temp_c),
+            "precipitation": float(rain_mm),
+            "humidity": float(humidity),
+        },
+    }
+
+    sim_pred: float
+    api_used = False
+    api_error: str = ""
     delta = 0.0
-    if rain_mm > 5:
-        delta += rain_mm * 0.08
-    if temp_c > 28 or temp_c < 2:
-        delta += abs(temp_c - 15) * 0.05
-    if is_holiday:
-        delta -= 0.5   # fewer trains → fewer cascading delays
-    if is_weekend:
-        delta -= 0.3
-    sim_pred = max(0.0, sim_base + delta)
+
+    try:
+        resp = _requests.post(f"{api_url}/predict", json=payload, timeout=4)
+        resp.raise_for_status()
+        result = resp.json()
+        sim_pred = float(result["predicted_delay_minutes"])
+        api_used = True
+    except _requests.exceptions.ConnectionError:
+        api_error = "API offline (run `uvicorn api:app` to enable live predictions)"
+        # Heuristic fallback
+        if rain_mm > 5:
+            delta += rain_mm * 0.08
+        if temp_c > 28 or temp_c < 2:
+            delta += abs(temp_c - 15) * 0.05
+        if is_holiday:
+            delta -= 0.5
+        if is_weekend:
+            delta -= 0.3
+        sim_pred = max(0.0, sim_base + delta)
+    except Exception as exc:
+        api_error = f"API error: {exc}"
+        sim_pred = max(0.0, sim_base)
 
     badge_col, badge_txt = _status_for_delay(sim_pred)
     line_col = LINE_COLOURS.get(selected_line, "#003688")
@@ -1108,20 +1142,27 @@ def render_simulator_tab(artifacts: Dict, selected_line: str, model_col: str, da
 
     st.markdown("#### Simulated Prediction")
 
+    if api_used:
+        st.success("Live model prediction (FastAPI)", icon=None)
+    elif api_error:
+        st.warning(f"Heuristic fallback — {api_error}")
+
     r1, r2, r3 = st.columns(3)
     with r1:
-        st.metric("Predicted Delay", f"{sim_pred:.2f} min", delta=f"{delta:+.2f} min vs baseline")
+        label = "Predicted Severity (model)" if api_used else "Predicted Severity (heuristic)"
+        st.metric(label, f"{sim_pred:.2f}")
     with r2:
-        st.metric("Baseline (this hour)", f"{sim_base:.2f} min")
+        st.metric("Test-data baseline (this hour)", f"{sim_base:.2f}")
     with r3:
-        st.metric("Weather Adjustment", f"{delta:+.2f} min")
+        src = "ML model" if api_used else "heuristic"
+        st.metric("Source", src)
 
     st.markdown(f"""
     <div style="background:{bg_card}; border:1px solid {bdr_card}; border-left:5px solid {badge_col};
                 border-radius:12px; padding:1.1rem 1.4rem; margin:1rem 0; font-family:'Inter',sans-serif;">
         <div style="display:flex; align-items:center; gap:1rem;">
             <span class="line-pill" style="background:{line_col}; font-size:0.9rem;">{selected_line}</span>
-            <span style="font-size:1.5rem; font-weight:800; color:{badge_col};">{sim_pred:.1f} min</span>
+            <span style="font-size:1.5rem; font-weight:800; color:{badge_col};">{sim_pred:.2f} sev</span>
             <span class="status-badge" style="background:{badge_col}20; color:{badge_col}; border:1.5px solid {badge_col};">
                 {badge_txt}
             </span>
@@ -1137,8 +1178,13 @@ def render_simulator_tab(artifacts: Dict, selected_line: str, model_col: str, da
     """, unsafe_allow_html=True)
 
     # ── Sensitivity sweeps ───────────────────────────────────────────────────
+    # Sweeps use heuristic deltas on the test-data baseline — calling the API
+    # for 80+ points per slider would be too slow for interactive use.
     st.markdown("#### Sensitivity Analysis")
-    st.caption("How does predicted delay change as each feature varies, holding others constant?")
+    st.caption(
+        "How does predicted delay change as each feature varies? "
+        "Sweeps use test-data baseline + heuristic scaling (not the live model)."
+    )
 
     sweep_col1, sweep_col2 = st.columns(2)
 
@@ -1238,13 +1284,76 @@ def render_diagnostics_tab(
 
         st.markdown("### Service Status Confusion Matrix")
         st.caption(
-            "Shows how well the model predicts the categorical TfL service status "
-            "derived from predicted delay minutes."
+            "Rounds predicted severity to the nearest integer (0/1/2) and compares "
+            "against the real TfL status label."
         )
         st.plotly_chart(
             create_confusion_matrix_chart(test_preds, model_col, dark=dark),
             use_container_width=True,
         )
+
+        # ── Classification metrics from classify.py ───────────────────────────
+        # classification_results.json has structure:
+        # {"ordinal_logistic": {"metrics": {...}}, "ordinal_lgbm": {...}}
+        clf_all = artifacts.get("classification_results", {})
+        if clf_all:
+            # Prefer LightGBM ordinal classifier; fall back to logistic
+            _clf_entry = clf_all.get("ordinal_lgbm") or clf_all.get("ordinal_logistic") or {}
+            clf_results = _clf_entry.get("metrics", {}) if isinstance(_clf_entry, dict) else {}
+            _clf_source = "LightGBM" if "ordinal_lgbm" in clf_all else "Logistic Regression"
+
+            st.markdown("### Classification Performance")
+            st.caption(
+                f"Discrete status classification from `classify.py` ({_clf_source}), trained on the "
+                "same features — predicting Good Service / Minor Delays / Severe Delays directly."
+            )
+            bg_m  = "#111827" if dark else "#f8f9fa"
+            bdr_m = "#1f2937" if dark else "#dee2e6"
+            txt_m = "#e8edf5" if dark else "#111827"
+            sub_m = "#8b949e" if dark else "#6b7280"
+
+            acc  = clf_results.get("accuracy")
+            f1   = clf_results.get("f1_weighted")
+            roc  = clf_results.get("roc_auc_ovr")
+            prec = clf_results.get("precision_weighted")
+
+            cm1, cm2, cm3, cm4 = st.columns(4)
+            for col, label, val in [
+                (cm1, "Accuracy",           acc),
+                (cm2, "F1 (weighted)",      f1),
+                (cm3, "ROC-AUC (OvR)",      roc),
+                (cm4, "Precision (wtd)",    prec),
+            ]:
+                display = f"{val:.3f}" if isinstance(val, float) else "—"
+                col.markdown(f"""
+                <div style="background:{bg_m}; border:1px solid {bdr_m}; border-radius:10px;
+                            padding:0.8rem 0.9rem; font-family:'Inter',sans-serif; text-align:center;">
+                    <div style="font-size:0.7rem; color:{sub_m}; text-transform:uppercase;
+                                letter-spacing:.05em; margin-bottom:0.2rem;">{label}</div>
+                    <div style="font-size:1.6rem; font-weight:800; color:{txt_m};">{display}</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+            # Per-class breakdown
+            per_class = clf_results.get("per_class", {})
+            if per_class:
+                st.markdown("<br>", unsafe_allow_html=True)
+                rows = []
+                for cls_name, v in per_class.items():
+                    if isinstance(v, dict) and "precision" in v:
+                        rows.append({
+                            "Class":     cls_name,
+                            "Precision": round(v["precision"], 3),
+                            "Recall":    round(v["recall"], 3),
+                            "F1":        round(v["f1-score"], 3),
+                            "Support":   int(v.get("support", 0)),
+                        })
+                if rows:
+                    st.dataframe(
+                        pd.DataFrame(rows),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
 
         if feat_imp is not None:
             st.markdown("### Feature Importance (SHAP)")
@@ -1262,14 +1371,14 @@ def render_diagnostics_tab(
     # ── Sub-tab B: Line Analysis ──────────────────────────────────────────────
     with sub_b:
         st.markdown("### Performance by Tube Line")
-        st.caption("Mean absolute error per line — taller bars indicate harder-to-predict lines.")
+        st.caption("Mean absolute error (severity units) per line — taller bars indicate harder-to-predict lines.")
         st.plotly_chart(
             create_line_perf_bar(test_preds, model_col, dark=dark),
             use_container_width=True,
         )
 
         st.markdown("### All Lines — Snapshot")
-        st.caption("Mean predicted delay across the latest available data window for each line.")
+        st.caption("Mean predicted severity across the latest available data window for each line.")
 
         records = []
         for line in ALL_LINES:
@@ -1306,7 +1415,7 @@ def render_diagnostics_tab(
                             font-family:'Inter',sans-serif;">
                     <div style="font-weight:700; font-size:0.92rem; color:{txt_col};">{line}</div>
                     <div style="font-size:1.9rem; font-weight:800; color:{lc}; margin:0.15rem 0; line-height:1.2;">
-                        {pred:.1f}<span style="font-size:0.9rem; font-weight:400;"> min</span>
+                        {pred:.2f}<span style="font-size:0.9rem; font-weight:400;"> sev</span>
                     </div>
                     <span style="background:{sc}20; color:{sc}; border:1px solid {sc};
                                  border-radius:12px; padding:0.12rem 0.55rem;
@@ -1314,18 +1423,18 @@ def render_diagnostics_tab(
                         {sl}
                     </span>
                     <div style="font-size:0.73rem; color:{muted}; margin-top:0.4rem;">
-                        MAE: {mae:.2f} min &nbsp;·&nbsp; n={rec['n']:,}
+                        MAE: {mae:.3f} &nbsp;·&nbsp; n={rec['n']:,}
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
 
         with st.expander("View as sortable table", expanded=False):
             df_view = pd.DataFrame(records).rename(columns={
-                "line": "Line", "pred": "Avg Predicted (min)",
-                "actual": "Avg Actual (min)", "mae": "MAE (min)", "n": "Records",
+                "line": "Line", "pred": "Avg Predicted Severity",
+                "actual": "Avg Actual Severity", "mae": "MAE", "n": "Records",
             })
             st.dataframe(
-                df_view.style.background_gradient(subset=["Avg Predicted (min)"], cmap="RdYlGn_r"),
+                df_view.style.background_gradient(subset=["Avg Predicted Severity"], cmap="RdYlGn_r"),
                 use_container_width=True,
                 hide_index=True,
             )
@@ -1350,12 +1459,12 @@ def render_diagnostics_tab(
         fig.add_trace(go.Scatter(
             x=line_df["timestamp"], y=line_df["actual"],
             mode="lines", name="Actual", line=dict(color="#6b7280", width=1.5, dash="dot"),
-            hovertemplate="Actual: %{y:.1f} min<extra></extra>",
+            hovertemplate="Actual: %{y:.2f}<extra></extra>",
         ))
         fig.add_trace(go.Scatter(
             x=line_df["timestamp"], y=line_df[model_col],
             mode="lines", name="Predicted", line=dict(color=lc, width=2),
-            hovertemplate="Predicted: %{y:.1f} min<extra></extra>",
+            hovertemplate="Predicted: %{y:.2f}<extra></extra>",
         ))
         fig.update_layout(
             paper_bgcolor=paper_bg, plot_bgcolor=plot_bg,
@@ -1363,7 +1472,7 @@ def render_diagnostics_tab(
             margin=dict(l=20, r=20, t=50, b=20),
             title=dict(text="Predictions vs Actuals Over Time", font=dict(size=15, color=font_col), x=0.01),
             xaxis=dict(gridcolor=grid_col),
-            yaxis=dict(title="Delay (minutes)", gridcolor=grid_col),
+            yaxis=dict(title="Severity (0=Good · 1=Minor · 2=Severe)", gridcolor=grid_col),
             hovermode="x unified", height=360,
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         )
@@ -1380,7 +1489,7 @@ def render_diagnostics_tab(
                 color=residuals,
                 colorscale=[[0, "#00B140"], [0.5, "#FFD300"], [1, "#DC241F"]],
             ),
-            hovertemplate="Residual: %{y:.1f} min<extra></extra>",
+            hovertemplate="Residual: %{y:.2f}<extra></extra>",
         ))
         fig2.update_layout(
             paper_bgcolor=paper_bg, plot_bgcolor=plot_bg,
@@ -1388,12 +1497,12 @@ def render_diagnostics_tab(
             margin=dict(l=20, r=20, t=50, b=20),
             title=dict(text="Residuals Over Time", font=dict(size=15, color=font_col), x=0.01),
             xaxis=dict(gridcolor=grid_col),
-            yaxis=dict(title="Residual (min)", gridcolor=grid_col),
+            yaxis=dict(title="Residual (severity units)", gridcolor=grid_col),
             height=280, showlegend=False,
         )
         st.plotly_chart(fig2, use_container_width=True)
 
-        st.markdown("### Average Delay by Hour of Day")
+        st.markdown("### Average Severity by Hour of Day")
         hourly = line_df.copy()
         hourly["hour"] = hourly["timestamp"].dt.hour
         hourly_agg = hourly.groupby("hour").agg(
@@ -1416,9 +1525,9 @@ def render_diagnostics_tab(
             paper_bgcolor=paper_bg, plot_bgcolor=plot_bg,
             font=dict(color=font_col, family="'Inter', sans-serif"),
             margin=dict(l=20, r=20, t=50, b=20),
-            title=dict(text="Average Delay by Hour of Day", font=dict(size=15, color=font_col), x=0.01),
+            title=dict(text="Average Severity by Hour of Day", font=dict(size=15, color=font_col), x=0.01),
             xaxis=dict(title="Hour", tickvals=list(range(0, 24, 2)), gridcolor=grid_col),
-            yaxis=dict(title="Avg Delay (min)", gridcolor=grid_col),
+            yaxis=dict(title="Avg Severity", gridcolor=grid_col),
             height=320, hovermode="x unified",
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         )
@@ -1578,7 +1687,7 @@ def render_about_tab(artifacts: Dict) -> None:
             </div>
             <div>
                 <div style="font-size:0.7rem; opacity:0.75; text-transform:uppercase; letter-spacing:.06em;">Test MAE</div>
-                <div style="font-size:1.3rem; font-weight:700;">{f'{mae:.2f} min' if isinstance(mae, float) else mae}</div>
+                <div style="font-size:1.3rem; font-weight:700;">{f'{mae:.3f} sev' if isinstance(mae, float) else mae}</div>
             </div>
             <div>
                 <div style="font-size:0.7rem; opacity:0.75; text-transform:uppercase; letter-spacing:.06em;">R² Score</div>
@@ -1597,8 +1706,9 @@ def render_about_tab(artifacts: Dict) -> None:
     with tab_a:
         st.markdown("""
         ### Purpose
-        This system predicts London Underground delay severity (in minutes) using machine learning,
-        helping transport planners anticipate disruptions before they escalate.
+        This system predicts London Underground **delay severity** — a real ordinal label directly from
+        the TfL Unified API (0 = Good Service, 1 = Minor Delays, 2 = Severe Delays) — using machine
+        learning, helping transport planners anticipate disruptions before they escalate.
 
         ### Research Questions
         1. Can ML models outperform a simple naive baseline for short-term delay prediction?
@@ -1606,8 +1716,9 @@ def render_about_tab(artifacts: Dict) -> None:
         3. How does model performance vary across different tube lines?
 
         ### Key Contributions
+        - **Real regression target** — `delay_severity` is a genuine TfL measurement, not a synthetic proxy.
         - **Rigorous temporal validation** — strict chronological 80/20 train/test split with no look-ahead.
-        - **Multi-model comparison** — Naive baseline vs Ridge regression vs LightGBM.
+        - **Multi-model comparison** — Naive baseline vs Ridge vs LightGBM vs XGBoost.
         - **SHAP explainability** — every prediction backed by feature-attribution scores.
         - **Real data collection** — a 2-week TfL + weather data pipeline built from scratch.
         - **This dashboard** — interactive, production-quality interface for the dissertation demo.
@@ -1615,6 +1726,16 @@ def render_about_tab(artifacts: Dict) -> None:
 
     with tab_b:
         st.markdown("""
+        ### Regression Target
+        **`delay_severity`** — an ordinal encoding of the real TfL service status label collected
+        directly from the TfL Unified API every 15 minutes:
+        - **0** = Good Service
+        - **1** = Minor Delays
+        - **2** = Severe Delays
+
+        This is 100% real measured data. The synthetic `delay_minutes` column (Gaussian proxy) is
+        deliberately **excluded** from model features to ensure no trivial identity leakage.
+
         ### Data Sources
         | Source | Content | Frequency |
         |--------|---------|-----------|
@@ -1624,7 +1745,7 @@ def render_about_tab(artifacts: Dict) -> None:
 
         ### Feature Engineering
         Transformations applied with leakage protection:
-        - **Lag features** — delay at t-1 h and t-3 h (per line)
+        - **Lag features** — severity at t-1 h and t-3 h (per line)
         - **Rolling statistics** — mean & std over 3 h and 12 h windows
         - **Weather deltas** — rate of change in temperature and precipitation
         - **Temporal one-hots** — hour, day-of-week, month, peak/off-peak flag
@@ -1633,14 +1754,17 @@ def render_about_tab(artifacts: Dict) -> None:
         ### Models
         | Model | Description |
         |-------|-------------|
-        | Naive | Persistence: last observed delay per line |
+        | Naive | Persistence: last observed severity per line |
         | Ridge | L2-regularised linear regression |
-        | LightGBM | Gradient-boosted trees with RandomisedSearchCV tuning |
+        | LightGBM | Gradient-boosted trees with Optuna (TPE) tuning |
+        | XGBoost | Gradient-boosted trees with RandomisedSearchCV tuning |
 
         ### Evaluation
-        - Primary metric: **MAE** (also RMSE, R²)
+        - Primary metric: **MAE** on severity scale 0–2 (also RMSE, R²)
         - Validation: 5-fold `TimeSeriesSplit` cross-validation
         - Test: held-out final 20% of chronological data
+        - Statistical tests: Wilcoxon signed-rank (pairwise model comparison)
+        - Classification view: Logistic regression on same features, F1 / ROC-AUC
         """)
 
     with tab_c:
@@ -1649,7 +1773,9 @@ def render_about_tab(artifacts: Dict) -> None:
             ("Python 3.x",       "Core language"),
             ("pandas / numpy",   "Data wrangling"),
             ("scikit-learn",     "Ridge, CV, preprocessing"),
-            ("LightGBM",         "Best model candidate"),
+            ("LightGBM",         "Gradient-boosted trees (primary)"),
+            ("XGBoost",          "Gradient-boosted trees (challenger)"),
+            ("Optuna",           "Hyperparameter optimisation (TPE)"),
             ("SHAP",             "Explainability"),
             ("Plotly",           "Interactive charts"),
             ("Streamlit",        "This dashboard"),
@@ -1695,3 +1821,149 @@ def render_about_tab(artifacts: Dict) -> None:
         - Synthetic data was used for initial development; real data collection
           is ongoing. Dissertation results are clearly labelled by data source.
         """)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tab 6 – Risk Map
+# ─────────────────────────────────────────────────────────────────────────────
+
+_RISK_THRESHOLDS = {"Low": 0.5, "Medium": 1.2}   # severity units (0–2 scale)
+_RISK_COLOURS    = {"Low": "#00782A", "Medium": "#E86B00", "High": "#D41515"}
+_RISK_BG         = {"Low": "#e8f5e9", "Medium": "#fff3e0", "High": "#fdecea"}
+
+
+def _risk_level(severity: float) -> str:
+    if severity < _RISK_THRESHOLDS["Low"]:
+        return "Low"
+    if severity < _RISK_THRESHOLDS["Medium"]:
+        return "Medium"
+    return "High"
+
+
+def render_risk_tab(artifacts: Dict, dark: bool) -> None:
+    """Per-line risk visualisation based on test-set predicted severity distributions.
+
+    Risk levels (severity 0–2 scale):
+      Low    median predicted severity < 0.5  (Good Service expected)
+      Medium 0.5–1.2  (Minor Delays expected)
+      High   >= 1.2   (Severe Delays expected)
+    """
+    test_preds = artifacts.get("test_predictions")
+    if test_preds is None:
+        st.warning("No prediction data available. Run `python train.py` first.")
+        return
+
+    st.markdown("### Network Risk Map")
+    st.caption(
+        "Risk level per line is derived from the median predicted severity on the held-out "
+        "test set (0=Good Service, 1=Minor Delays, 2=Severe Delays). "
+        "Thresholds: Low < 0.5 · Medium 0.5–1.2 · High ≥ 1.2."
+    )
+
+    # ── Per-line stats ────────────────────────────────────────────────────────
+    records = []
+    for line, grp in test_preds.groupby("line"):
+        median_pred = float(grp["pred_best"].median())
+        mean_pred   = float(grp["pred_best"].mean())
+        p95_pred    = float(grp["pred_best"].quantile(0.95))
+        mae         = float((grp["actual"] - grp["pred_best"]).abs().mean())
+        risk        = _risk_level(median_pred)
+        records.append({
+            "line":        line,
+            "median_pred": median_pred,
+            "mean_pred":   mean_pred,
+            "p95_pred":    p95_pred,
+            "mae":         mae,
+            "risk":        risk,
+        })
+
+    risk_df = pd.DataFrame(records).sort_values("median_pred", ascending=False).reset_index(drop=True)
+
+    # ── Summary KPI row ───────────────────────────────────────────────────────
+    counts = risk_df["risk"].value_counts()
+    k1, k2, k3 = st.columns(3)
+    bg  = "#1a2235" if dark else "#f8f9fa"
+    bdr = "#243050" if dark else "#dee2e6"
+    txt = "#e6edf3" if dark else "#111827"
+    sub = "#8b949e" if dark else "#6b7280"
+
+    for col, level in zip([k1, k2, k3], ["High", "Medium", "Low"]):
+        n = int(counts.get(level, 0))
+        colour = _RISK_COLOURS[level]
+        col.markdown(f"""
+        <div style="background:{bg}; border:1px solid {bdr}; border-left:5px solid {colour};
+                    border-radius:10px; padding:0.9rem 1.1rem; font-family:'Inter',sans-serif;">
+            <div style="font-size:0.72rem; color:{sub}; text-transform:uppercase;
+                        letter-spacing:.06em;">{level} Risk Lines</div>
+            <div style="font-size:2rem; font-weight:800; color:{colour};">{n}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── Horizontal bar chart coloured by risk ─────────────────────────────────
+    bar_colours = [_RISK_COLOURS[r] for r in risk_df["risk"]]
+    fig = go.Figure(go.Bar(
+        x=risk_df["median_pred"],
+        y=risk_df["line"],
+        orientation="h",
+        marker_color=bar_colours,
+        text=[f"{v:.2f}" for v in risk_df["median_pred"]],
+        textposition="outside",
+        hovertemplate=(
+            "<b>%{y}</b><br>"
+            "Median predicted severity: %{x:.2f}<br>"
+            "95th percentile: %{customdata[0]:.2f}<br>"
+            "Test MAE: %{customdata[1]:.3f}<extra></extra>"
+        ),
+        customdata=risk_df[["p95_pred", "mae"]].values,
+    ))
+    fig.add_vline(x=_RISK_THRESHOLDS["Low"],    line_dash="dot",  line_color="#00782A",
+                  annotation_text="Low / Medium", annotation_position="top right")
+    fig.add_vline(x=_RISK_THRESHOLDS["Medium"], line_dash="dot",  line_color="#D41515",
+                  annotation_text="Medium / High", annotation_position="top right")
+    fig.update_layout(
+        title="Median Predicted Severity by Line (test set)",
+        xaxis_title="Median Predicted Severity (0=Good · 1=Minor · 2=Severe)",
+        yaxis_title="",
+        paper_bgcolor="#0d1117" if dark else "#ffffff",
+        plot_bgcolor ="#161b22" if dark else "#fafbfc",
+        font=dict(color="#e6edf3" if dark else "#1a1a2e", family="'Segoe UI',sans-serif"),
+        margin=dict(l=20, r=80, t=50, b=20),
+        height=420,
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    # ── Per-line risk cards ───────────────────────────────────────────────────
+    st.markdown("#### Line-by-Line Risk Detail")
+    cols_per_row = 3
+    rows = [risk_df.iloc[i:i+cols_per_row] for i in range(0, len(risk_df), cols_per_row)]
+    for row_slice in rows:
+        cols = st.columns(cols_per_row)
+        for col, (_, r) in zip(cols, row_slice.iterrows()):
+            colour = _RISK_COLOURS[r["risk"]]
+            card_bg = _RISK_BG[r["risk"]] if not dark else "#1a2235"
+            col.markdown(f"""
+            <div style="background:{card_bg}; border:1px solid {colour};
+                        border-radius:12px; padding:0.85rem 1rem;
+                        font-family:'Inter',sans-serif; margin-bottom:0.5rem;">
+                <div style="font-weight:700; font-size:0.9rem; color:#111827;">{r['line']}</div>
+                <div style="display:flex; justify-content:space-between; margin-top:0.4rem;">
+                    <span style="font-size:1.4rem; font-weight:800; color:{colour};">{r['risk']}</span>
+                    <span style="font-size:0.8rem; color:#555; align-self:flex-end;">
+                        med {r['median_pred']:.2f} sev
+                    </span>
+                </div>
+                <div style="font-size:0.75rem; color:#777; margin-top:0.3rem;">
+                    p95 {r['p95_pred']:.2f} &nbsp;·&nbsp; MAE {r['mae']:.3f}
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    # ── Methodology note ─────────────────────────────────────────────────────
+    st.caption(
+        "Risk is computed from the best model's predictions on the held-out 20% "
+        "test set (chronological split). Severity is a real TfL label: "
+        "0 = Good Service, 1 = Minor Delays, 2 = Severe Delays. "
+        "This is a retrospective measure for evaluation purposes, not a real-time operational alert."
+    )
