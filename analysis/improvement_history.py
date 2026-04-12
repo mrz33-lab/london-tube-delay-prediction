@@ -154,6 +154,7 @@ def run() -> None:
 
     # Load the saved-run metrics dynamically so this row stays accurate after
     # retraining — previously these were hardcoded constants that silently diverged.
+    run_id = get_latest_run_id(ROOT / "artifacts")
     _metrics_file = ROOT / "artifacts" / run_id / "all_metrics.json"
     try:
         import json as _json
