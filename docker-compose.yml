@@ -1,0 +1,52 @@
+# London Underground Delay Prediction — Docker Compose
+#
+# Usage:
+#   docker compose up          # start API (assumes artifacts/ already built)
+#   docker compose up --build  # rebuild image first
+#   docker compose up collector  # run one data collection cycle and exit
+#
+# Prerequisites:
+#   1. Copy .env.example to .env and fill in API keys.
+#   2. Run `python train.py` locally (or in a train service below) to populate artifacts/.
+
+services:
+
+  api:
+    build: .
+    image: tube-delay-api:latest
+    ports:
+      - "${API_PORT:-8000}:8000"
+    environment:
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-}
+    volumes:
+      # Mount artifacts read-only so the container cannot corrupt model files.
+      - ./artifacts:/app/artifacts:ro
+      - ./data:/app/data:ro
+    restart: unless-stopped
+    healthcheck:
+      test: >
+        python -c "
+        import urllib.request, sys;
+        r = urllib.request.urlopen('http://localhost:8000/health', timeout=8);
+        sys.exit(0 if r.status == 200 else 1)"
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+
+  collector:
+    build: .
+    image: tube-delay-api:latest
+    # Override CMD: run data collection on a 15-min loop.
+    # Remove --once to run continuously; add --interval N to change frequency.
+    command: ["python", "data_collection.py"]
+    environment:
+      - TFL_API_KEY=${TFL_API_KEY:-}
+      - WEATHER_API_KEY=${WEATHER_API_KEY:?WEATHER_API_KEY must be set}
+    volumes:
+      # Data dir is writable: the collector appends rows to tfl_merged.csv.
+      - ./data:/app/data
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
