@@ -1,0 +1,148 @@
+paths:
+  project_root: c:\Users\marwan\Downloads\Claude
+  data_dir: c:\Users\marwan\Downloads\Claude\data
+  artifacts_dir: c:\Users\marwan\Downloads\Claude\artifacts
+  real_data_file: tfl_merged.csv
+data:
+  required_columns:
+  - timestamp
+  - line
+  - status
+  - delay_minutes
+  - temp_c
+  - precipitation_mm
+  - humidity
+  - crowding_index
+  - is_weekend
+  - hour
+  - day_of_week
+  - month
+  - peak_time
+  - is_holiday
+  tube_lines:
+  - Central
+  - Jubilee
+  - Northern
+  - Victoria
+  - Piccadilly
+  - Bakerloo
+  - District
+  - Circle
+  - Metropolitan
+  - Hammersmith & City
+  - Waterloo & City
+  status_categories:
+  - Good Service
+  - Minor Delays
+  - Severe Delays
+  synthetic_n_days: 365
+  synthetic_samples_per_day: 96
+  delay_min: 0.0
+  delay_max: 120.0
+  temp_min: -5.0
+  temp_max: 35.0
+  precipitation_min: 0.0
+  precipitation_max: 50.0
+  humidity_min: 0.0
+  humidity_max: 100.0
+  crowding_min: 0.0
+  crowding_max: 1.0
+features:
+  lag_features:
+  - 1
+  - 3
+  rolling_windows:
+  - 3
+  - 12
+  target_column: delay_minutes
+  group_column: line
+  time_column: timestamp
+  exclude_columns:
+  - timestamp
+  - status
+models:
+  train_ratio: 0.8
+  cv_splits: 5
+  n_iter_search: 20
+  models_to_train:
+  - naive
+  - ridge
+  - lightgbm
+  lightgbm_params:
+    num_leaves:
+    - 15
+    - 31
+    - 63
+    max_depth:
+    - 3
+    - 5
+    - 7
+    - -1
+    learning_rate:
+    - 0.01
+    - 0.05
+    - 0.1
+    n_estimators:
+    - 50
+    - 100
+    - 200
+    min_child_samples:
+    - 20
+    - 50
+    - 100
+    subsample:
+    - 0.7
+    - 0.8
+    - 0.9
+    - 1.0
+    colsample_bytree:
+    - 0.7
+    - 0.8
+    - 0.9
+    - 1.0
+    reg_alpha:
+    - 0.0
+    - 0.1
+    - 1.0
+    reg_lambda:
+    - 0.0
+    - 0.1
+    - 1.0
+  ridge_params:
+    alpha:
+    - 0.001
+    - 0.01
+    - 0.1
+    - 1.0
+    - 10.0
+    - 100.0
+  rf_params:
+    n_estimators:
+    - 50
+    - 100
+    - 200
+    max_depth:
+    - 5
+    - 10
+    - 15
+    - null
+    min_samples_split:
+    - 2
+    - 5
+    - 10
+    min_samples_leaf:
+    - 1
+    - 2
+    - 4
+  scoring: neg_mean_absolute_error
+explainability:
+  shap_sample_size: 500
+  shap_background_size: 100
+  top_n_features: 10
+  n_local_examples: 3
+logging:
+  log_level: INFO
+  log_format: '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+  log_date_format: '%Y-%m-%d %H:%M:%S'
+random_seed: 42
+run_id: run_20260210_152745
