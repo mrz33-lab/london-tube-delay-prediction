@@ -76,17 +76,34 @@ CROWDING_WEIGHTS: Dict[str, float] = {
     "Bakerloo": 0.04, "Hammersmith & City": 0.04, "Waterloo & City": 0.02,
 }
 
-# Status thresholds match config.data.status_good_max / status_minor_max
-STATUS_GOOD_MAX:  float = 3.0
-STATUS_MINOR_MAX: float = 10.0
+# Status thresholds match config.data.status_good_max / status_minor_max.
+# Model target is delay_severity (0=Good, 1=Minor, 2=Severe); use midpoints.
+STATUS_GOOD_MAX:  float = 0.5
+STATUS_MINOR_MAX: float = 1.5
+
+# UI-only rough conversion: severity (0–2) → approximate delay minutes.
+# Calibrated so severity 1 ≈ 5 min (Minor), severity 2 ≈ 10 min (Severe).
+SEV_TO_MIN: float = 5.0
+
+
+def _fmt_min(decimal_min: float) -> str:
+    """Convert decimal minutes to a compact 'Xm Ys' string for display."""
+    total_sec = round(decimal_min * 60)
+    m, s = divmod(max(0, total_sec), 60)
+    if m == 0:
+        return f"{s}s"
+    if s == 0:
+        return f"{m}m"
+    return f"{m}m {s}s"
+
 
 PEAK_HOURS: List[Tuple[int, int]] = [(7, 9), (17, 19)]
 
-# Fallback metrics from run_20260410_225700 — used only when artifacts missing
+# Fallback metrics (severity scale 0-2) — used only when artifacts are missing
 _FALLBACK_METRICS: Dict = {
-    "best":  {"test_mae": 2.41, "test_rmse": 4.91,  "test_r2": 0.749},
-    "ridge": {"test_mae": 2.80, "test_rmse": 5.42,  "test_r2": 0.694},
-    "naive": {"test_mae": 7.26, "test_rmse": 12.05, "test_r2": -0.515},
+    "best":  {"test_mae": 0.118, "test_rmse": 0.281, "test_r2": 0.857},
+    "ridge": {"test_mae": 0.180, "test_rmse": 0.346, "test_r2": 0.783},
+    "naive": {"test_mae": 0.498, "test_rmse": 0.969, "test_r2": -0.698},
 }
 
 WEATHER_OPTIONS:  List[str]        = ["Clear", "Light Rain", "Heavy Rain", "Wind", "Fog"]
@@ -375,12 +392,26 @@ def _load_tabular(artifact_dir: str) -> Dict:
     if comp_p.exists():
         out["model_comparison"] = pd.read_csv(comp_p)
 
-    # Feature importance: prefer latest run, fall back to run_20260310 which has it
+    # Feature importance: prefer latest run, then scan previous runs backwards
+    # so we pick up the most recent non-empty feature_importance.csv available.
     fi_p = path / "feature_importance.csv"
     if not fi_p.exists():
-        fi_p = ROOT / "artifacts" / "run_20260310_164049" / "feature_importance.csv"
+        art_root = path.parent
+        try:
+            for run_dir in sorted(art_root.iterdir(), reverse=True):
+                candidate = run_dir / "feature_importance.csv"
+                if candidate.exists():
+                    fi_p = candidate
+                    break
+        except Exception:
+            pass
     if fi_p.exists():
-        out["feature_importance"] = pd.read_csv(fi_p)
+        fi_df = pd.read_csv(fi_p)
+        # Strip sklearn Pipeline prefixes (e.g. "num__", "cat__") that appear
+        # in older SHAP outputs so feature names match the PLAIN lookup dict.
+        fi_df["feature"] = fi_df["feature"].str.replace(
+            r"^(num|cat)__", "", regex=True)
+        out["feature_importance"] = fi_df
 
     bn_p = path / "best_model_name.txt"
     if bn_p.exists():
@@ -477,21 +508,19 @@ def _predict_scenario(
 
 def _gauge(delay_min: float, t: Dict) -> go.Figure:
     """
-    Semi-circle gauge on a 0–20 min scale.
-    I chose 20 min as the upper bound: anything beyond that is operationally
-    'Severe' and extra granularity is not useful for the dashboard audience.
-    Colour zones match the status thresholds.
+    Semi-circle gauge on a 0–2 severity scale (model target: delay_severity).
+    Colour zones: green 0–0.5 (Good), yellow 0.5–1.5 (Minor), red 1.5–2 (Severe).
     """
     colour, label = _status(delay_min)
-    val = round(max(0.0, min(delay_min, 25.0)), 1)
+    val = round(max(0.0, min(delay_min, 2.5)), 2)
     fig = go.Figure(go.Indicator(
         mode="gauge+number",
         value=val,
-        number=dict(font=dict(size=44, color=t["font"]), suffix=" min"),
+        number=dict(font=dict(size=44, color=t["font"]), suffix=""),
         gauge=dict(
-            axis=dict(range=[0, 20], tickwidth=1, tickcolor=t["muted"],
-                      tickvals=[0, 3, 10, 20],
-                      ticktext=["0", "3 min", "10 min", "20 min"],
+            axis=dict(range=[0, 2], tickwidth=1, tickcolor=t["muted"],
+                      tickvals=[0, STATUS_GOOD_MAX, STATUS_MINOR_MAX, 2],
+                      ticktext=["0", "Good", "Minor", "Severe"],
                       tickfont=dict(size=9, color=t["muted"])),
             bar=dict(color=colour, thickness=0.55),
             bgcolor="rgba(0,0,0,0)", borderwidth=0,
@@ -499,7 +528,7 @@ def _gauge(delay_min: float, t: Dict) -> go.Figure:
                 dict(range=[0,  STATUS_GOOD_MAX],  color="rgba(0,177,64,0.10)"),
                 dict(range=[STATUS_GOOD_MAX, STATUS_MINOR_MAX],
                      color="rgba(255,211,0,0.10)"),
-                dict(range=[STATUS_MINOR_MAX, 20],  color="rgba(220,36,31,0.10)"),
+                dict(range=[STATUS_MINOR_MAX, 2],  color="rgba(220,36,31,0.10)"),
             ],
             threshold=dict(line=dict(color=colour, width=3),
                            thickness=0.8, value=val),
@@ -529,7 +558,7 @@ def _sparkline(hours: List[int], values: List[float], line_name: str,
         x=hours, y=clean, mode="lines",
         line=dict(color=lc, width=2),
         fill="tozeroy", fillcolor=f"rgba({r},{g},{b},0.10)",
-        hovertemplate="%{x:02d}:00 → %{y:.1f} min<extra></extra>",
+        hovertemplate="%{x:02d}:00 → %{y:.2f} sev<extra></extra>",
         connectgaps=False,
     ))
     fig.update_layout(
@@ -560,14 +589,14 @@ def _network_heatmap(test_preds: pd.DataFrame, model_col: str, t: Dict) -> go.Fi
         y=pivot.index.tolist(),
         colorscale=[[0, "#00B140"], [0.2, "#FFD300"],
                     [0.5, "#FF6600"], [1.0, "#DC241F"]],
-        colorbar=dict(title="min", tickfont=dict(color=t["font"])),
-        hovertemplate="<b>%{y}</b>  %{x}<br>Avg: %{z:.1f} min<extra></extra>",
+        colorbar=dict(title="sev", tickfont=dict(color=t["font"])),
+        hovertemplate="<b>%{y}</b>  %{x}<br>Avg: %{z:.2f} sev<extra></extra>",
     ))
     fig.update_layout(
         paper_bgcolor=t["paper"], plot_bgcolor=t["paper"],
         font=dict(color=t["font"]),
         margin=dict(l=165, r=20, t=48, b=60), height=420,
-        title=dict(text="Avg Delay by Line & Hour (test set)",
+        title=dict(text="Avg Severity by Line & Hour (test set)",
                    font=dict(size=14, color=t["font"]), x=0.01),
         xaxis=dict(title="Hour", tickangle=-45, gridcolor=t["grid"],
                    tickfont=dict(color=t["muted"])),
@@ -603,19 +632,19 @@ def _forecast_chart(test_preds: pd.DataFrame, line: str,
     fig.add_trace(go.Scatter(
         x=ldf["timestamp"], y=ldf["actual"], mode="lines", name="Actual",
         line=dict(color=t["muted"], width=1.5, dash="dot"),
-        hovertemplate="Actual: %{y:.1f} min  %{x|%d %b %H:%M}<extra></extra>",
+        hovertemplate="Actual: %{y:.2f} sev  %{x|%d %b %H:%M}<extra></extra>",
     ))
     fig.add_trace(go.Scatter(
         x=ldf["timestamp"], y=ldf[model_col], mode="lines", name="Predicted",
         line=dict(color=lc, width=2.5),
-        hovertemplate="Predicted: %{y:.1f} min  %{x|%d %b %H:%M}<extra></extra>",
+        hovertemplate="Predicted: %{y:.2f} sev  %{x|%d %b %H:%M}<extra></extra>",
     ))
     fig = _fig_base(fig, t, f"Prediction History — {line} Line", height=360)
     fig.update_layout(
         hovermode="x unified",
         xaxis=dict(title="", tickformat="%d %b %H:%M",
                    tickfont=dict(color=t["muted"])),
-        yaxis=dict(title="Delay (minutes)"),
+        yaxis=dict(title="Delay severity (0–2)"),
         legend=dict(orientation="h", yanchor="bottom", y=1.02,
                     xanchor="right", x=1),
     )
@@ -642,10 +671,10 @@ def _model_comparison_chart(metrics: Dict, t: Dict) -> go.Figure:
         c, n = colors[m], labels[m]
         fig.add_trace(go.Bar(name=n, x=[n], y=[mae], marker_color=c,
                              showlegend=(i == 0),
-                             hovertemplate=f"MAE: %{{y:.3f}} min<extra></extra>"), 1, 1)
+                             hovertemplate=f"MAE: %{{y:.3f}} sev<extra></extra>"), 1, 1)
         fig.add_trace(go.Bar(name=n, x=[n], y=[rmse], marker_color=c,
                              showlegend=False,
-                             hovertemplate=f"RMSE: %{{y:.3f}} min<extra></extra>"), 1, 2)
+                             hovertemplate=f"RMSE: %{{y:.3f}} sev<extra></extra>"), 1, 2)
         fig.add_trace(go.Bar(name=n, x=[n], y=[r2], marker_color=c,
                              showlegend=False,
                              hovertemplate=f"R²: %{{y:.4f}}<extra></extra>"), 1, 3)
@@ -732,7 +761,7 @@ def _error_histogram(test_preds: pd.DataFrame, model_col: str, t: Dict) -> go.Fi
     fig.add_trace(go.Histogram(
         x=errors, nbinsx=60, name="Residuals",
         marker_color="#0098D4", opacity=0.72,
-        hovertemplate="Error: %{x:.1f} min<br>Count: %{y}<extra></extra>"))
+        hovertemplate="Error: %{x:.3f} sev<br>Count: %{y}<extra></extra>"))
     fig.add_trace(go.Scatter(
         x=centres, y=vals * scale, mode="lines", name="Density",
         line=dict(color="#E32017", width=2.5), hoverinfo="skip"))
@@ -740,7 +769,7 @@ def _error_histogram(test_preds: pd.DataFrame, model_col: str, t: Dict) -> go.Fi
                   annotation_text="Zero error",
                   annotation_font=dict(color=t["font"], size=10))
     fig = _fig_base(fig, t, "Residual Distribution", height=320)
-    fig.update_layout(xaxis_title="Error (minutes)", yaxis_title="Count",
+    fig.update_layout(xaxis_title="Error (severity units)", yaxis_title="Count",
                       bargap=0.04)
     return fig
 
@@ -755,16 +784,16 @@ def _scatter_actual_pred(test_preds: pd.DataFrame, model_col: str, t: Dict) -> g
         mode="markers", name="Predictions",
         marker=dict(size=4, opacity=0.48, color=errors,
                     colorscale=[[0,"#00B140"],[0.5,"#FFD300"],[1,"#DC241F"]],
-                    colorbar=dict(title="Error (min)", thickness=12,
+                    colorbar=dict(title="Error (sev)", thickness=12,
                                   tickfont=dict(color=t["font"]))),
-        hovertemplate="Actual: %{x:.1f} min<br>Predicted: %{y:.1f} min<extra></extra>",
+        hovertemplate="Actual: %{x:.2f} sev<br>Predicted: %{y:.2f} sev<extra></extra>",
     ))
     fig.add_trace(go.Scatter(
         x=[0, mx], y=[0, mx], mode="lines", name="Perfect fit",
         line=dict(color=t["muted"], dash="dash", width=1.5), hoverinfo="skip"))
     fig = _fig_base(fig, t, "Predicted vs Actual", height=380)
-    fig.update_layout(xaxis=dict(title="Actual (min)", range=[0, mx]),
-                      yaxis=dict(title="Predicted (min)", range=[0, mx]))
+    fig.update_layout(xaxis=dict(title="Actual (severity)", range=[0, mx]),
+                      yaxis=dict(title="Predicted (severity)", range=[0, mx]))
     return fig
 
 
@@ -780,10 +809,61 @@ def _per_line_mae_bar(test_preds: pd.DataFrame, model_col: str, t: Dict) -> go.F
                for v in perf["MAE"]]
     fig = go.Figure(go.Bar(
         x=perf["line"], y=perf["MAE"], marker_color=colours,
-        hovertemplate="<b>%{x}</b><br>MAE: %{y:.2f} min<extra></extra>"))
+        hovertemplate="<b>%{x}</b><br>MAE: %{y:.3f} sev<extra></extra>"))
     fig = _fig_base(fig, t, "MAE by Tube Line", height=320)
-    fig.update_layout(xaxis_title="", yaxis_title="MAE (minutes)",
+    fig.update_layout(xaxis_title="", yaxis_title="MAE (severity)",
                       xaxis_tickangle=-30)
+    return fig
+
+
+def _confusion_matrix_chart(test_preds: pd.DataFrame, model_col: str, t: Dict) -> go.Figure:
+    """
+    3×3 confusion matrix: severity bands Good (0) / Minor (1) / Severe (2).
+    Rows = actual class, columns = predicted class.
+    Cells show raw count and row-normalised percentage (how often the model
+    gets each class right).  Green outline on the diagonal highlights correct
+    predictions.  Overall accuracy shown in the title.
+    """
+    actual_cls = test_preds["actual"].round().clip(0, 2).astype(int)
+    pred_cls   = test_preds[model_col].round().clip(0, 2).astype(int)
+
+    cm = np.zeros((3, 3), dtype=int)
+    for a, p in zip(actual_cls, pred_cls):
+        cm[a][p] += 1
+
+    row_sums = cm.sum(axis=1, keepdims=True).clip(1)
+    cm_pct   = (cm / row_sums * 100)
+
+    labels    = ["Good (0)", "Minor (1)", "Severe (2)"]
+    cell_text = [[f"{cm[i][j]}<br>{cm_pct[i][j]:.0f}%" for j in range(3)]
+                 for i in range(3)]
+
+    accuracy = cm.diagonal().sum() / max(cm.sum(), 1) * 100
+
+    fig = go.Figure(go.Heatmap(
+        z=cm_pct,
+        x=[f"Pred: {l}" for l in labels],
+        y=[f"Actual: {l}" for l in labels],
+        text=cell_text,
+        texttemplate="%{text}",
+        textfont=dict(size=13, color=t["font"]),
+        colorscale=[[0, t["plot"]], [0.5, "#0055A4"], [1, "#003B6F"]],
+        colorbar=dict(title="Row %", tickfont=dict(color=t["font"])),
+        hovertemplate="Actual: %{y}<br>Predicted: %{x}<br>%{text}<extra></extra>",
+        zmin=0, zmax=100,
+    ))
+
+    # Green border on diagonal cells
+    for i in range(3):
+        fig.add_shape(type="rect",
+                      x0=i - 0.5, x1=i + 0.5, y0=i - 0.5, y1=i + 0.5,
+                      line=dict(color="#00B140", width=2.5),
+                      fillcolor="rgba(0,0,0,0)")
+
+    fig = _fig_base(fig, t,
+                    f"Confusion Matrix — Classification Accuracy: {accuracy:.1f}%",
+                    height=400)
+    fig.update_layout(margin=dict(l=140, r=20, t=60, b=100))
     return fig
 
 
@@ -822,6 +902,77 @@ def _arch_diagram(t: Dict) -> go.Figure:
         yaxis=dict(visible=False, range=[1.5, 4.5]),
         margin=dict(l=0, r=0, t=10, b=10), height=180)
     return fig
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LIVE TfL STATUS STRIP
+# ─────────────────────────────────────────────────────────────────────────────
+
+@st.cache_data(show_spinner=False, ttl=120)
+def _fetch_tfl_status() -> Dict[str, str]:
+    """
+    Fetch current line statuses from the TfL Unified API.
+    TTL=120 s so the strip refreshes every 2 min without hammering the API.
+    Returns {} on any network/parse failure so the strip is silently hidden.
+    """
+    try:
+        import requests as _req
+        resp = _req.get(
+            "https://api.tfl.gov.uk/Line/Mode/tube/Status",
+            timeout=5,
+            headers={"Accept": "application/json"},
+        )
+        resp.raise_for_status()
+        out: Dict[str, str] = {}
+        for entry in resp.json():
+            name     = entry.get("name", "")
+            statuses = entry.get("lineStatuses", [{}])
+            desc     = statuses[0].get("statusSeverityDescription", "Unknown")
+            out[name] = desc
+        return out
+    except Exception:
+        return {}
+
+
+def _render_live_status_strip(t: Dict) -> None:
+    """
+    Collapsible strip showing real-time TfL line statuses with colour-coded
+    dot badges. Silently omitted when the API is unreachable.
+    """
+    live = _fetch_tfl_status()
+    if not live:
+        return
+
+    def _dot_col(desc: str) -> str:
+        d = desc.lower()
+        if "good" in d:
+            return "#00B140"
+        if "minor" in d or "reduced" in d:
+            return "#FFD300"
+        if "severe" in d or "suspend" in d or "part" in d or "close" in d:
+            return "#DC241F"
+        return "#9CA3AF"
+
+    badges = "".join(
+        f'<span style="display:inline-flex;align-items:center;gap:.3rem;'
+        f'background:{_dot_col(status)}1A;border:1px solid {_dot_col(status)}66;'
+        f'border-radius:20px;padding:.18rem .55rem;font-size:.72rem;font-weight:700;'
+        f'color:{_dot_col(status)};white-space:nowrap;margin:.15rem;">'
+        f'<span style="width:7px;height:7px;border-radius:50%;'
+        f'background:{_dot_col(status)};display:inline-block;flex-shrink:0;"></span>'
+        f'{line}</span>'
+        for line, status in sorted(live.items())
+        if line in LINE_NAMES
+    )
+
+    with st.expander("🔴 Live TfL Status — updated every 2 min", expanded=True):
+        st.markdown(
+            f'<div style="display:flex;flex-wrap:wrap;gap:.25rem;padding:.3rem 0;">'
+            f'{badges}</div>',
+            unsafe_allow_html=True,
+        )
+        st.caption("Source: TfL Unified API  ·  Green = Good Service  ·  "
+                   "Amber = Minor Delays  ·  Red = Severe / Suspended")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -958,7 +1109,7 @@ def _render_sidebar(metrics: Dict, best_name: str) -> Dict:
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:.35rem;">
         <div>
           <div style="color:rgba(255,255,255,.5);font-size:.62rem;">Test MAE</div>
-          <div style="color:#00D46A;font-weight:900;font-size:.98rem;">{mae:.2f} min</div>
+          <div style="color:#00D46A;font-weight:900;font-size:.98rem;">{mae:.3f}</div>
         </div>
         <div>
           <div style="color:rgba(255,255,255,.5);font-size:.62rem;">R²</div>
@@ -973,6 +1124,57 @@ def _render_sidebar(metrics: Dict, best_name: str) -> Dict:
                 weather=weather, temp_c=temp_c,
                 precip_mm=precip_mm, humidity=humidity,
                 wind_kph=wind_kph, network_mode=network_mode)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BATCH 24-H SCENARIO PREDICTOR  (creates one predictor instance for all hours)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@st.cache_data(show_spinner=False, ttl=60)
+def _predict_24h_scenario(
+    line: str, dow: int,
+    temp_c: float, precip_mm: float, humidity: int,
+) -> List[Optional[float]]:
+    """
+    Return a 24-element list of severity predictions, one per hour (0–23).
+    Creates a single FutureDelayPredictor instance to avoid repeated disk loads.
+    Cached for 60 s so rapid sidebar tweaks don't re-run the model.
+    Returns None for any hour that fails; callers fall back to test-data average.
+    """
+    try:
+        from future_prediction import FutureDelayPredictor
+        cfg = get_config()
+        latest_run = get_latest_run_id(cfg.paths.artifacts_dir)
+        if latest_run is None:
+            return [None] * 24
+        art = cfg.paths.artifacts_dir / latest_run
+        predictor = FutureDelayPredictor(
+            str(art / "best_model.pkl"),
+            str(art / "feature_metadata.pkl"),
+        )
+        now = datetime.now()
+        results: List[Optional[float]] = []
+        for h in range(24):
+            try:
+                candidate = now.replace(hour=h, minute=0, second=0, microsecond=0)
+                if dow != now.weekday():
+                    days_ahead = (dow - now.weekday()) % 7 or 7
+                    candidate = (now + timedelta(days=days_ahead)).replace(
+                        hour=h, minute=0, second=0, microsecond=0)
+                elif candidate <= now:
+                    candidate += timedelta(days=1)
+                res = predictor.predict_delay(
+                    line=line, target_datetime=candidate,
+                    weather_forecast={"temperature": temp_c,
+                                      "precipitation": precip_mm,
+                                      "humidity": humidity},
+                )
+                results.append(float(res["predicted_delay_minutes"]))
+            except Exception:
+                results.append(None)
+        return results
+    except Exception:
+        return [None] * 24
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1033,8 +1235,8 @@ def _tab_predictions(models: Dict, tabular: Dict, sb: Dict, t: Dict) -> None:
                           color:{t['font']};">Overall Network Delay</div>
               <div style="font-size:3rem;font-weight:900;color:{net_col};
                           line-height:1.1;margin:.2rem 0;">
-                {net_delay:.1f}
-                <span style="font-size:1.1rem;font-weight:500;color:{t['muted']};"> min</span>
+                {_fmt_min(net_delay * SEV_TO_MIN)}
+                <span style="font-size:.8rem;font-weight:400;color:{t['muted']};opacity:.65;"> ({net_delay:.2f} sev)</span>
               </div>
               <span style="background:{net_col}22;color:{net_col};
                            border:1.5px solid {net_col};border-radius:20px;
@@ -1080,22 +1282,22 @@ def _tab_predictions(models: Dict, tabular: Dict, sb: Dict, t: Dict) -> None:
                              margin-bottom:.3rem;">
                   <div style="font-weight:800;font-size:.9rem;color:{text_col};">{ln}</div>
                   <div style="font-size:1.55rem;font-weight:900;color:{text_col};
-                              line-height:1.2;">{delay:.1f}
-                    <span style="font-size:.8rem;font-weight:500;"> min</span></div>
+                              line-height:1.2;">{_fmt_min(delay * SEV_TO_MIN)}
+                    <span style="font-size:.65rem;font-weight:400;opacity:.55;"> ({delay:.2f})</span></div>
                   <span style="background:rgba(0,0,0,.22);color:{text_col};
                                border-radius:10px;padding:.12rem .45rem;
                                font-size:.68rem;font-weight:700;">{sl}</span>
                 </div>""", unsafe_allow_html=True)
                 st.plotly_chart(
                     _sparkline(list(range(24)), day_data, ln, t, height=70),
-                    use_container_width=True,
+                    width='stretch',
                     config={"displayModeBar": False},
                     key=f"overview_spark_{ln}")
 
         st.markdown("---")
         st.markdown("### Network Delay Heatmap (Test Data)")
         st.plotly_chart(_network_heatmap(test_preds, model_col, t),
-                        use_container_width=True, key="overview_network_heatmap")
+                        width='stretch', key="overview_network_heatmap")
         return
 
     # ══════════════════════════════════════════════════════════
@@ -1145,9 +1347,9 @@ def _tab_predictions(models: Dict, tabular: Dict, sb: Dict, t: Dict) -> None:
             {line} Line</div>
           <div style="font-size:3.6rem;font-weight:900;color:{text_col};
                       line-height:1;letter-spacing:-.03em;">
-            {pred_val:.1f}<span style="font-size:1.3rem;font-weight:500;"> min</span></div>
+            {_fmt_min(pred_val * SEV_TO_MIN)}<span style="font-size:.95rem;font-weight:400;opacity:.55;"> ({pred_val:.2f} sev)</span></div>
           <div style="font-size:.82rem;color:{text_col};opacity:.78;margin-top:.25rem;">
-            95% CI: [{ci_lo:.1f} – {ci_hi:.1f} min]</div>
+            95% CI: [{_fmt_min(ci_lo * SEV_TO_MIN)} – {_fmt_min(ci_hi * SEV_TO_MIN)}] &nbsp;·&nbsp; severity: {ci_lo:.2f}–{ci_hi:.2f}</div>
         </div>
         <div style="text-align:right;">
           <span style="display:inline-block;padding:.4rem 1rem;border-radius:22px;
@@ -1166,7 +1368,7 @@ def _tab_predictions(models: Dict, tabular: Dict, sb: Dict, t: Dict) -> None:
     # ── Gauge + SHAP mini-summary ─────────────────────────────────────────────
     g_col, f_col = st.columns([1, 1.35])
     with g_col:
-        st.plotly_chart(_gauge(pred_val, t), use_container_width=True,
+        st.plotly_chart(_gauge(pred_val, t), width='stretch',
                         config={"displayModeBar": False}, key="predict_gauge")
 
     with f_col:
@@ -1224,51 +1426,70 @@ def _tab_predictions(models: Dict, tabular: Dict, sb: Dict, t: Dict) -> None:
 
     # ── 24-hour day forecast sparkline ───────────────────────────────────────
     st.markdown(f"### 24-Hour Forecast — {line} Line")
-    day_data = [
-        test_preds[(test_preds["line"] == line) &
-                   (test_preds["timestamp"].dt.hour == h) &
-                   (test_preds["timestamp"].dt.dayofweek == dow)
-                   ][model_col].mean()
-        for h in range(24)]
+    with st.spinner("Computing scenario forecast…"):
+        live_24h = _predict_24h_scenario(line, dow, temp_c, precip_mm, humidity)
+
+    used_live = sum(1 for v in live_24h if v is not None)
+    day_data: List[float] = []
+    for h, live_val in enumerate(live_24h):
+        if live_val is not None:
+            day_data.append(live_val)
+        else:
+            fb = test_preds[
+                (test_preds["line"] == line) &
+                (test_preds["timestamp"].dt.hour == h) &
+                (test_preds["timestamp"].dt.dayofweek == dow)
+            ][model_col].mean()
+            day_data.append(float(fb) if pd.notna(fb) else 0.0)
 
     spark = _sparkline(list(range(24)), day_data, line, t, height=170)
     spark.update_layout(
-        yaxis_title="Predicted Delay (min)",
+        yaxis_title="Predicted Severity (0–2)",
         xaxis=dict(
             title="Hour of Day",
             tickvals=list(range(0, 24, 2)),
             ticktext=[f"{h:02d}:00" for h in range(0, 24, 2)],
         ))
-    st.plotly_chart(spark, use_container_width=True,
+    st.plotly_chart(spark, width='stretch',
                     config={"displayModeBar": False}, key="predict_spark")
-    st.caption("Peak hours (07–09, 17–19) shaded. Based on test-split data for the selected day.")
+    if used_live == 24:
+        st.caption(
+            f"Live scenario forecast for {['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][dow]} "
+            f"· {WEATHER_ICONS.get(sb['weather'],'')} {sb['weather']} · {temp_c}°C "
+            f"· {precip_mm} mm · Peak hours (07–09, 17–19) shaded.")
+    elif used_live > 0:
+        st.caption(
+            f"Scenario forecast ({used_live}/24 hours live, remainder from test-set averages). "
+            "Peak hours shaded.")
+    else:
+        st.caption("Test-set averages for the selected day (live predictor unavailable). Peak hours shaded.")
 
     st.markdown("---")
 
     # ── Prediction history chart ──────────────────────────────────────────────
     st.markdown(f"### Prediction History — {line} Line")
     st.plotly_chart(_forecast_chart(test_preds, line, model_col, t),
-                    use_container_width=True, key="predict_forecast_chart")
+                    width='stretch', key="predict_forecast_chart")
 
     with st.expander("Summary Statistics", expanded=False):
         c1, c2 = st.columns(2)
         with c1:
-            st.markdown("**Actual Delay**")
+            st.markdown("**Actual Severity**")
             s = line_df["actual"]
             st.table(pd.DataFrame({
                 "Metric": ["Mean","Median","Std Dev","Min","Max"],
-                "Value": [f"{s.mean():.2f} min", f"{s.median():.2f} min",
-                          f"{s.std():.2f} min",  f"{s.min():.1f} min",
-                          f"{s.max():.1f} min"],
+                "Value": [f"{s.mean():.3f} sev", f"{s.median():.3f} sev",
+                          f"{s.std():.3f} sev",  f"{s.min():.2f} sev",
+                          f"{s.max():.2f} sev"],
             }))
         with c2:
-            st.markdown("**Predicted Delay (LightGBM)**")
+            st.markdown("**Predicted Severity (LightGBM)**")
             p = line_df[model_col]
             st.table(pd.DataFrame({
                 "Metric": ["Mean","Median","Std Dev","Min","Max"],
-                "Value": [f"{p.mean():.2f} min", f"{p.median():.2f} min",
-                          f"{p.std():.2f} min",  f"{p.min():.2f} min",
-                          f"{p.max():.2f} min"],
+                "Value": [f"{p.mean():.3f} sev", f"{p.median():.3f} sev",
+                          f"{p.std():.3f} sev",  f"{p.min():.3f} sev",
+                          f"{p.max():.3f} sev"],
             }))
 
 
@@ -1293,9 +1514,9 @@ def _tab_performance(tabular: Dict, t: Dict) -> None:
 
     k1, k2, k3, k4 = st.columns(4)
     with k1:
-        st.metric("Test MAE",  f"{mae:.3f} min",
+        st.metric("Test MAE",  f"{mae:.3f}",
                   delta=f"−{impr:.1f}% vs Naive", delta_color="inverse")
-    with k2: st.metric("Test RMSE", f"{rmse:.3f} min")
+    with k2: st.metric("Test RMSE", f"{rmse:.3f}")
     with k3: st.metric("R² Score",  f"{r2:.3f}")
     with k4: st.metric("Improvement vs Naive", f"−{impr:.1f}%",
                         delta="vs baseline", delta_color="inverse")
@@ -1303,7 +1524,7 @@ def _tab_performance(tabular: Dict, t: Dict) -> None:
     st.markdown("---")
     st.markdown("### Model Comparison")
     if metrics:
-        st.plotly_chart(_model_comparison_chart(metrics, t), use_container_width=True, key="perf_model_comparison")
+        st.plotly_chart(_model_comparison_chart(metrics, t), width='stretch', key="perf_model_comparison")
 
     if comp_df is not None:
         with st.expander("Detailed Metrics Table", expanded=False):
@@ -1314,12 +1535,12 @@ def _tab_performance(tabular: Dict, t: Dict) -> None:
                     nm = float(naive_row["Test MAE"].iloc[0])
                     dc["vs Naive (MAE)"] = dc["Test MAE"].apply(
                         lambda x: f"{(1 - x / nm) * 100:+.1f}%")
-            st.dataframe(dc, use_container_width=True, hide_index=True)
+            st.dataframe(dc, width='stretch', hide_index=True)
 
     st.markdown("---")
     st.markdown("### Feature Importance (SHAP)")
     if feat_imp is not None:
-        st.plotly_chart(_feature_importance_chart(feat_imp, t), use_container_width=True, key="perf_feature_importance")
+        st.plotly_chart(_feature_importance_chart(feat_imp, t), width='stretch', key="perf_feature_importance")
     else:
         st.info("Feature importance not found. Run `python explain.py` to generate SHAP values.")
 
@@ -1329,16 +1550,26 @@ def _tab_performance(tabular: Dict, t: Dict) -> None:
         c1, c2 = st.columns(2)
         with c1:
             st.plotly_chart(_error_histogram(test_preds, "pred_best", t),
-                            use_container_width=True, key="perf_error_hist")
+                            width='stretch', key="perf_error_hist")
         with c2:
             st.plotly_chart(_scatter_actual_pred(test_preds, "pred_best", t),
-                            use_container_width=True, key="perf_scatter_actual_pred")
+                            width='stretch', key="perf_scatter_actual_pred")
+
+    st.markdown("---")
+    st.markdown("### Classification Accuracy")
+    st.caption(
+        "Predictions rounded to nearest integer (0 = Good Service, "
+        "1 = Minor Delays, 2 = Severe Delays). "
+        "Green diagonal = correct classifications; off-diagonal = misclassifications.")
+    if test_preds is not None:
+        st.plotly_chart(_confusion_matrix_chart(test_preds, "pred_best", t),
+                        width='stretch', key="perf_confusion_matrix")
 
     st.markdown("---")
     st.markdown("### Per-Line Performance")
     if test_preds is not None:
         st.plotly_chart(_per_line_mae_bar(test_preds, "pred_best", t),
-                        use_container_width=True, key="perf_per_line_mae_bar")
+                        width='stretch', key="perf_per_line_mae_bar")
         rows = []
         for ln in LINE_NAMES:
             ldf = test_preds[test_preds["line"] == ln]
@@ -1348,16 +1579,16 @@ def _tab_performance(tabular: Dict, t: Dict) -> None:
             var_actual = ldf["actual"].var()
             r2_val = float(1 - ae.var() / var_actual) if var_actual > 0 else float("nan")
             rows.append({"Line": ln,
-                         "MAE (min)":  round(ae.mean(), 3),
-                         "RMSE (min)": round(float(np.sqrt((ae**2).mean())), 3),
+                         "MAE (sev)":  round(ae.mean(), 3),
+                         "RMSE (sev)": round(float(np.sqrt((ae**2).mean())), 3),
                          "R²":         round(r2_val, 3),
                          "N":          len(ldf)})
         if rows:
-            df_p = pd.DataFrame(rows).sort_values("MAE (min)")
+            df_p = pd.DataFrame(rows).sort_values("MAE (sev)")
             st.dataframe(
                 df_p.style.background_gradient(
-                    subset=["MAE (min)"], cmap="RdYlGn_r"),
-                use_container_width=True, hide_index=True)
+                    subset=["MAE (sev)"], cmap="RdYlGn_r"),
+                width='stretch', hide_index=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1420,7 +1651,7 @@ def _tab_line_comparison(tabular: Dict, t: Dict) -> None:
     fig_par.update_layout(
         paper_bgcolor=t["paper"], font=dict(color=t["font"]),
         margin=dict(l=80, r=80, t=60, b=40), height=380)
-    st.plotly_chart(fig_par, use_container_width=True, key="comp_parallel")
+    st.plotly_chart(fig_par, width='stretch', key="comp_parallel")
     st.markdown("---")
 
     # ── Radar chart ───────────────────────────────────────────────────────────
@@ -1450,7 +1681,7 @@ def _tab_line_comparison(tabular: Dict, t: Dict) -> None:
             angularaxis=dict(gridcolor=t["grid"],
                              tickfont=dict(color=t["font"]))),
         margin=dict(l=40, r=40, t=40, b=40), height=400)
-    st.plotly_chart(fig_rad, use_container_width=True, key="comp_radar")
+    st.plotly_chart(fig_rad, width='stretch', key="comp_radar")
     st.markdown("---")
 
     # ── Head-to-head ──────────────────────────────────────────────────────────
@@ -1487,7 +1718,7 @@ def _tab_line_comparison(tabular: Dict, t: Dict) -> None:
     st.dataframe(
         df.drop(columns=["Colour"]).sort_values("MAE")
           .style.background_gradient(subset=["MAE","Avg Delay"], cmap="RdYlGn_r"),
-        use_container_width=True, hide_index=True)
+        width='stretch', hide_index=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1524,21 +1755,21 @@ def _tab_historical(tabular: Dict, t: Dict) -> None:
             x=daily["date"], y=daily["actual"],
             mode="lines+markers", name=ln,
             line=dict(color=lc, width=2), marker=dict(size=4),
-            hovertemplate=f"{ln}<br>%{{x}}<br>%{{y:.1f}} min<extra></extra>"))
+            hovertemplate=f"{ln}<br>%{{x}}<br>%{{y:.2f}} sev<extra></extra>"))
 
     fig_trend = _fig_base(fig_trend, t,
-                          "Average Actual Delay by Day (test set)", height=360)
+                          "Average Actual Severity by Day (test set)", height=360)
     fig_trend.update_layout(
-        yaxis_title="Delay (minutes)",
+        yaxis_title="Severity (0–2)",
         legend=dict(orientation="h", yanchor="bottom", y=1.02,
                     xanchor="right", x=1))
-    st.plotly_chart(fig_trend, use_container_width=True, key="hist_trend")
+    st.plotly_chart(fig_trend, width='stretch', key="hist_trend")
     st.markdown("---")
 
     # ── Error histogram ───────────────────────────────────────────────────────
     st.markdown("### Prediction Residuals")
     st.plotly_chart(_error_histogram(test_preds, "pred_best", t),
-                    use_container_width=True, key="hist_error_hist")
+                    width='stretch', key="hist_error_hist")
     st.markdown("---")
 
     # ── Day × hour heatmap ────────────────────────────────────────────────────
@@ -1554,8 +1785,8 @@ def _tab_historical(tabular: Dict, t: Dict) -> None:
         x=[f"{h:02d}:00" for h in range(24)],
         y=pivot_dh.index.tolist(),
         colorscale=[[0,"#00B140"],[.3,"#FFD300"],[.7,"#FF6600"],[1,"#DC241F"]],
-        colorbar=dict(title="min", tickfont=dict(color=t["font"])),
-        hovertemplate="<b>%{y}</b>  %{x}<br>Avg: %{z:.1f} min<extra></extra>"))
+        colorbar=dict(title="sev", tickfont=dict(color=t["font"])),
+        hovertemplate="<b>%{y}</b>  %{x}<br>Avg: %{z:.2f} sev<extra></extra>"))
     fig_dh.update_layout(
         paper_bgcolor=t["paper"], plot_bgcolor=t["paper"],
         font=dict(color=t["font"]),
@@ -1567,7 +1798,7 @@ def _tab_historical(tabular: Dict, t: Dict) -> None:
         fig_dh.add_vrect(
             x0=f"{s:02d}:00", x1=f"{e:02d}:00",
             fillcolor="rgba(227,32,23,0.06)", line_width=0)
-    st.plotly_chart(fig_dh, use_container_width=True, key="hist_day_hour_heatmap")
+    st.plotly_chart(fig_dh, width='stretch', key="hist_day_hour_heatmap")
     st.markdown("---")
 
     # ── Best / worst summary ──────────────────────────────────────────────────
@@ -1577,14 +1808,14 @@ def _tab_historical(tabular: Dict, t: Dict) -> None:
     day_means  = df.groupby("weekday")["actual"].mean()
 
     bw1, bw2, bw3 = st.columns(3)
-    bw1.metric("Worst Line",  line_means.idxmax(), f"{line_means.max():.1f} min avg")
-    bw1.metric("Best Line",   line_means.idxmin(), f"{line_means.min():.1f} min avg")
+    bw1.metric("Worst Line",  line_means.idxmax(), f"{line_means.max():.2f} sev avg")
+    bw1.metric("Best Line",   line_means.idxmin(), f"{line_means.min():.2f} sev avg")
     bw2.metric("Worst Hour",  f"{hour_means.idxmax():02d}:00",
-               f"{hour_means.max():.1f} min avg")
+               f"{hour_means.max():.2f} sev avg")
     bw2.metric("Best Hour",   f"{hour_means.idxmin():02d}:00",
-               f"{hour_means.min():.1f} min avg")
-    bw3.metric("Worst Day",   day_means.idxmax(), f"{day_means.max():.1f} min avg")
-    bw3.metric("Best Day",    day_means.idxmin(), f"{day_means.min():.1f} min avg")
+               f"{hour_means.min():.2f} sev avg")
+    bw3.metric("Worst Day",   day_means.idxmax(), f"{day_means.max():.2f} sev avg")
+    bw3.metric("Best Day",    day_means.idxmin(), f"{day_means.min():.2f} sev avg")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1649,7 +1880,7 @@ def _tab_data_collection(t: Dict) -> None:
             hovertemplate="%{x}<br>%{y:,} records<extra></extra>"))
         fig_tl = _fig_base(fig_tl, t, "Collection Timeline", height=260)
         fig_tl.update_layout(yaxis_title="Records", xaxis_title="Date")
-        st.plotly_chart(fig_tl, use_container_width=True, key="hist_timeline")
+        st.plotly_chart(fig_tl, width='stretch', key="hist_timeline")
 
     if "line" in df.columns and "timestamp" in df.columns:
         st.markdown("---")
@@ -1670,7 +1901,7 @@ def _tab_data_collection(t: Dict) -> None:
             font=dict(color=t["font"]),
             margin=dict(l=165, r=20, t=44, b=60), height=360,
             yaxis=dict(tickfont=dict(color=t["font"])))
-        st.plotly_chart(fig_cov, use_container_width=True, key="hist_coverage")
+        st.plotly_chart(fig_cov, width='stretch', key="hist_coverage")
 
     st.markdown("---")
     st.markdown("### Export")
@@ -1712,7 +1943,7 @@ def _tab_about(tabular: Dict, t: Dict) -> None:
             f'letter-spacing:.06em;color:#FFFFFF;">{lab}</div>'
             f'<div style="font-size:1.2rem;font-weight:700;color:#FFFFFF;">{val}</div></div>'
             for lab, val in [("Best Model", best_name),
-                             ("Test MAE", f"{mae:.3f} min"),
+                             ("Test MAE", f"{mae:.3f} sev"),
                              ("R²", f"{r2:.3f}"),
                              ("Lines", "11"),
                              ("Features", "40"),
@@ -1726,7 +1957,7 @@ def _tab_about(tabular: Dict, t: Dict) -> None:
     # ── Architecture ──────────────────────────────────────────────────────────
     with about_tabs[0]:
         st.markdown("### System Architecture")
-        st.plotly_chart(_arch_diagram(t), use_container_width=True,
+        st.plotly_chart(_arch_diagram(t), width='stretch',
                         config={"displayModeBar": False})
         st.markdown(f"""
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:.9rem;margin-top:.5rem;">
@@ -1752,8 +1983,8 @@ def _tab_about(tabular: Dict, t: Dict) -> None:
     with about_tabs[1]:
         st.markdown("### Key Numbers")
         stats = [
-            ("Test MAE",         f"{mae:.3f} min",    "#E32017"),
-            ("Test RMSE",        f"{rmse:.3f} min",   "#E32017"),
+            ("Test MAE",         f"{mae:.3f} sev",    "#E32017"),
+            ("Test RMSE",        f"{rmse:.3f} sev",   "#E32017"),
             ("R² Score",         f"{r2:.3f}",          "#003B6F"),
             ("vs Naive",         f"−{(1-mae/n_mae)*100:.0f}%", "#00B140"),
             ("Training rows",    "~56,000",            "#0098D4"),
@@ -1843,23 +2074,26 @@ def _tab_about(tabular: Dict, t: Dict) -> None:
 | Property | Value |
 |---|---|
 | Model type | LightGBM (gradient-boosted trees) |
-| Target variable | `delay_minutes` — real measured delay from TfL API |
-| Target scale | 0 – 120 minutes (continuous regression) |
+| Target variable | `delay_severity` — ordinal encoding of TfL status label |
+| Target scale | 0 = Good Service · 1 = Minor Delays · 2 = Severe Delays |
 | Training rows | ~56,000 (15-min intervals, 16 days, 11 lines) |
 | Test rows | ~6,742 (final 20 %, strict chronological split) |
 | CV strategy | 5-fold TimeSeriesSplit |
 | HPO | Optuna TPE, 50 trials |
 | Random seed | 42 |
-| **Test MAE** | **{mae:.3f} min** |
-| **Test RMSE** | **{rmse:.3f} min** |
+| **Test MAE** | **{mae:.3f} sev** |
+| **Test RMSE** | **{rmse:.3f} sev** |
 | **Test R²** | **{r2:.3f}** |
 | vs Naive | −{(1-mae/n_mae)*100:.0f}% MAE improvement |
 | vs Ridge | −{(1-mae/r_mae)*100:.0f}% MAE improvement |
 
-**Status label thresholds** (matching real TfL operational categories):
-- Good Service: predicted delay < 3 min
-- Minor Delays: 3–10 min
-- Severe Delays: ≥ 10 min
+**Status label thresholds** (severity midpoints):
+- Good Service: predicted severity < 0.5
+- Minor Delays: 0.5 – 1.5
+- Severe Delays: ≥ 1.5
+
+**Note:** `delay_minutes` is a synthetic proxy not used as the model target.
+The TfL Unified API reports status categories, not minute values per line.
         """)
 
     # ── Ethics ────────────────────────────────────────────────────────────────
@@ -1937,6 +2171,7 @@ def main() -> None:
     t = _theme()
 
     _render_header()
+    _render_live_status_strip(t)
 
     metrics   = tabular.get("metrics", _FALLBACK_METRICS)
     best_name = tabular.get("best_model_name", "lightgbm")

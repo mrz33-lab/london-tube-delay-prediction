@@ -475,8 +475,23 @@ def generate_event_calendar(
     """
     real_df = load_real_event_calendar()
     if real_df is not None:
+        cal_min = real_df['date'].min().date()
+        cal_max = real_df['date'].max().date()
+        # Use end-of-day for end_date so intra-day events are included.
+        end_ts = pd.Timestamp(end_date) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
         in_range = real_df[(real_df['date'] >= pd.Timestamp(start_date)) &
-                           (real_df['date'] <= pd.Timestamp(end_date))]
+                           (real_df['date'] <= end_ts)]
+        # If the calendar spans the query range, trust it — even an empty result
+        # just means no events on that day (correct).  Only fall back to synthetic
+        # when the calendar does not cover the query range at all.
+        if cal_min <= start_date and cal_max >= end_date:
+            if len(in_range) > 0:
+                logger.info('Using REAL event calendar: %d events (%s to %s)',
+                            len(in_range), start_date, end_date)
+            else:
+                logger.debug('No events in range %s–%s (calendar covers range)',
+                             start_date, end_date)
+            return in_range.reset_index(drop=True)
         if len(in_range) > 0:
             logger.info('Using REAL event calendar: %d events (%s to %s)',
                         len(in_range), start_date, end_date)

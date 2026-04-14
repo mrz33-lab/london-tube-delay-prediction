@@ -56,9 +56,10 @@ class DataConfig:
         'Good Service', 'Minor Delays', 'Severe Delays'
     ])
 
-    # thresholds for mapping predicted delay -> status label
-    status_good_max: float = 3.0
-    status_minor_max: float = 10.0
+    # thresholds for mapping predicted delay_severity -> status label
+    # Model target is delay_severity (0=Good, 1=Minor, 2=Severe); use midpoints.
+    status_good_max: float = 0.5
+    status_minor_max: float = 1.5
 
     synthetic_n_days: int = 365
     synthetic_samples_per_day: int = 96  # every 15 min

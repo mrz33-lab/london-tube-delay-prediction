@@ -355,6 +355,7 @@ def create_preprocessing_pipeline(
         ))
 
     preprocessor = ColumnTransformer(transformers=transformers)
+    preprocessor.set_output(transform="pandas")
     logger.info("Created preprocessing pipeline")
     return preprocessor
 

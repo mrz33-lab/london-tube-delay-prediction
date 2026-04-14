@@ -110,21 +110,22 @@ LINE_OFFPEAK_TPH: Dict[str, int] = {
     'Waterloo & City':      4,
 }
 
-# Baseline delay per line in minutes — calibrated from training-data mean lag_delay_1
-# across all observations (train + test splits).  Used by FutureDelayPredictor as
-# cold-start defaults when no recent history is available.
+# Baseline delay_severity per line (0=Good, 1=Minor, 2=Severe) — calibrated from
+# the per-line mean of the delay_severity target across train + test splits.
+# Used by FutureDelayPredictor as cold-start defaults when no recent history is
+# available.  Values are in the same 0-2 ordinal scale as the training target.
 LINE_BASE_DELAYS: Dict[str, float] = {
-    'Bakerloo':            5.5,
-    'Central':             3.2,
-    'Circle':              3.7,
-    'District':            6.8,
-    'Hammersmith & City':  6.2,
-    'Jubilee':             2.8,
-    'Metropolitan':        5.8,
-    'Northern':            4.1,
-    'Piccadilly':          4.4,
-    'Victoria':            2.9,
-    'Waterloo & City':     7.5,
+    'Bakerloo':            0.46,
+    'Central':             0.23,
+    'Circle':              0.59,
+    'District':            0.94,
+    'Hammersmith & City':  0.38,
+    'Jubilee':             0.13,
+    'Metropolitan':        0.16,
+    'Northern':            0.17,
+    'Piccadilly':          0.32,
+    'Victoria':            0.03,
+    'Waterloo & City':     0.71,
 }
 
 
