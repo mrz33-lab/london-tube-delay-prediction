@@ -110,6 +110,26 @@ class FutureDelayPredictor:
 
         return pd.DataFrame(predictions)
 
+    def predict_from_features(self, features: pd.DataFrame, line: str) -> Dict:
+        """Run model.predict + CI for a pre-built feature row.
+
+        Accepts a DataFrame already prepared by _engineer_features (or any
+        caller that assembles the correct columns).  Does NOT validate that
+        target_datetime is in the future, so this is safe to call for
+        historical/scenario datetimes from the dashboard.
+
+        Returns:
+            dict with keys: prediction, ci_lo, ci_hi
+        """
+        self._validate_features(features)
+        pred = float(self.model.predict(features)[0])
+        lo, hi = self._get_confidence_interval(pred, line)
+        return {
+            "prediction": max(0.0, pred),
+            "ci_lo":      max(0.0, float(lo)),
+            "ci_hi":      float(hi),
+        }
+
     # ------------------------------------------------------------------
 
     def _engineer_features(self, line, target_datetime, weather_forecast,

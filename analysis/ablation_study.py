@@ -250,6 +250,31 @@ def run() -> None:
 
     results = pd.DataFrame(records).sort_values("delta", ascending=False)
 
+    # --- Save JSON (for dashboard consumption) ---
+    ablation_json = {
+        "full_mae":   round(float(full_mae),  4),
+        "full_rmse":  round(float(full_rmse), 4),
+        "full_r2":    round(float(full_r2),   4),
+        "naive_mae":  round(float(naive_mae), 4),
+        "records": [
+            {
+                "group":      r["group"],
+                "mae":        r["mae"],
+                "delta":      r["delta"],
+                "pct_change": r["pct_change"],
+                "rmse":       r["rmse"],
+                "r2":         r["r2"],
+                "n_removed":  r["n_removed"],
+            }
+            for r in records
+        ],
+    }
+    import json as _json
+    json_path = output_dir / "ablation_results.json"
+    with open(json_path, "w") as _f:
+        _json.dump(ablation_json, _f, indent=2)
+    logger.info("Saved ablation JSON → %s", json_path)
+
     # --- Markdown table ---
     print("\n| Removed Group | MAE | Delta vs Full Model | % Change |")
     print("|---------------|-----|---------------------|----------|")

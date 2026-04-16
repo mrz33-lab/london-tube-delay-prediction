@@ -6,12 +6,6 @@ import logging
 import json
 import subprocess
 import sys
-import warnings
-warnings.filterwarnings(
-    "ignore",
-    message="X does not have valid feature names",
-    category=UserWarning,
-)
 from pathlib import Path
 from typing import Dict, Any, Tuple, Optional
 import time
@@ -57,11 +51,6 @@ except ImportError:
 
 
 logger = logging.getLogger(__name__)
-
-
-def _rmse(y_true, y_pred) -> float:
-    """Root mean squared error — named function for use as a metric callable."""
-    return float(np.sqrt(mean_squared_error(y_true, y_pred)))
 
 
 def _get_git_hash() -> str:
@@ -206,7 +195,8 @@ def train_naive_baseline(X_train, y_train, X_test, y_test):
 
     metrics = evaluate_model(model, X_train, y_train, X_test, y_test)
 
-    logger.info(f"Naive baseline - Test MAE: {metrics['test_mae']:.3f}, Test RMSE: {metrics['test_rmse']:.3f}")
+    logger.info("Naive baseline - Test MAE: %.3f, Test RMSE: %.3f",
+                metrics['test_mae'], metrics['test_rmse'])
     return model, metrics
 
 
@@ -223,7 +213,7 @@ def train_ridge_baseline(X_train, y_train, X_test, y_test,
     ])
 
     param_grid = {
-        f'regressor__alpha': config.models.ridge_params['alpha']
+        'regressor__alpha': config.models.ridge_params['alpha']
     }
 
     tscv = TimeSeriesSplit(n_splits=config.models.cv_splits)
@@ -240,13 +230,14 @@ def train_ridge_baseline(X_train, y_train, X_test, y_test,
     )
 
     search.fit(X_train, y_train)
-    logger.info(f"Best Ridge alpha: {search.best_params_['regressor__alpha']:.4f}")
+    logger.info("Best Ridge alpha: %.4f", search.best_params_['regressor__alpha'])
 
     best_model = search.best_estimator_
     metrics = evaluate_model(best_model, X_train, y_train, X_test, y_test)
     metrics['best_params'] = search.best_params_
 
-    logger.info(f"Ridge - Test MAE: {metrics['test_mae']:.3f}, Test RMSE: {metrics['test_rmse']:.3f}")
+    logger.info("Ridge - Test MAE: %.3f, Test RMSE: %.3f",
+                metrics['test_mae'], metrics['test_rmse'])
     return best_model, metrics
 
 
@@ -317,7 +308,7 @@ def train_lightgbm(X_train, y_train, X_test, y_test,
     )
     study.optimize(objective, n_trials=config.models.optuna_n_trials, n_jobs=1)
 
-    logger.info(f"Best LightGBM params: {study.best_params}")
+    logger.info("Best LightGBM params: %s", study.best_params)
 
     best_model = Pipeline([
         ('preprocessor', preprocessor),
@@ -333,7 +324,8 @@ def train_lightgbm(X_train, y_train, X_test, y_test,
     metrics = evaluate_model(best_model, X_train, y_train, X_test, y_test)
     metrics['best_params'] = study.best_params
 
-    logger.info(f"LightGBM - Test MAE: {metrics['test_mae']:.3f}, Test RMSE: {metrics['test_rmse']:.3f}")
+    logger.info("LightGBM - Test MAE: %.3f, Test RMSE: %.3f",
+                metrics['test_mae'], metrics['test_rmse'])
     return best_model, metrics
 
 
@@ -389,55 +381,47 @@ def train_xgboost(X_train, y_train, X_test, y_test,
 
 def train_fallback_model(X_train, y_train, X_test, y_test,
                          numeric_features, categorical_features, config):
-    """XGBoost or RandomForest fallback when LightGBM isn't installed."""
+    """XGBoost or RandomForest fallback when LightGBM isn't installed.
+
+    Delegates to train_xgboost when XGBoost is available so the two code
+    paths stay in sync.  Only owns the RandomForest branch.
+    """
     if XGBOOST_AVAILABLE:
         logger.info("Training XGBoost (LightGBM fallback)...")
-        model_name = "xgboost"
+        model, metrics = train_xgboost(
+            X_train, y_train, X_test, y_test,
+            numeric_features, categorical_features, config,
+        )
+        return model, metrics, "xgboost"
 
-        preprocessor = create_preprocessing_pipeline(numeric_features, categorical_features)
-        pipeline = Pipeline([
-            ('preprocessor', preprocessor),
-            ('regressor', xgb.XGBRegressor(random_state=RANDOM_SEED, verbosity=0))
-        ])
+    logger.info("Training RandomForest (LightGBM/XGBoost fallback)...")
+    preprocessor = create_preprocessing_pipeline(numeric_features, categorical_features)
+    pipeline = Pipeline([
+        ('preprocessor', preprocessor),
+        ('regressor', RandomForestRegressor(random_state=RANDOM_SEED, n_jobs=-1))
+    ])
 
-        param_grid = {
-            'regressor__n_estimators': [50, 100, 200],
-            'regressor__max_depth': [3, 5, 7],
-            'regressor__learning_rate': [0.01, 0.05, 0.1],
-            'regressor__subsample': [0.7, 0.8, 0.9, 1.0]
-        }
-    else:
-        logger.info("Training RandomForest (LightGBM/XGBoost fallback)...")
-        model_name = "randomforest"
-
-        preprocessor = create_preprocessing_pipeline(numeric_features, categorical_features)
-        pipeline = Pipeline([
-            ('preprocessor', preprocessor),
-            ('regressor', RandomForestRegressor(random_state=RANDOM_SEED, n_jobs=-1))
-        ])
-
-        param_grid = {
-            f'regressor__{k}': v for k, v in config.models.rf_params.items()
-        }
+    param_grid = {
+        'regressor__%s' % k: v for k, v in config.models.rf_params.items()
+    }
 
     tscv = TimeSeriesSplit(n_splits=config.models.cv_splits)
-
     search = RandomizedSearchCV(
         pipeline, param_distributions=param_grid,
         n_iter=config.models.n_iter_search,
         cv=tscv, scoring=config.models.scoring,
-        random_state=RANDOM_SEED, n_jobs=-1, verbose=1
+        random_state=RANDOM_SEED, n_jobs=-1, verbose=1,
     )
-
     search.fit(X_train, y_train)
-    logger.info(f"Best {model_name} params: {search.best_params_}")
+    logger.info("Best randomforest params: %s", search.best_params_)
 
     best_model = search.best_estimator_
     metrics = evaluate_model(best_model, X_train, y_train, X_test, y_test)
     metrics['best_params'] = search.best_params_
 
-    logger.info(f"{model_name} - Test MAE: {metrics['test_mae']:.3f}, Test RMSE: {metrics['test_rmse']:.3f}")
-    return best_model, metrics, model_name
+    logger.info("RandomForest - Test MAE: %.3f, Test RMSE: %.3f",
+                metrics['test_mae'], metrics['test_rmse'])
+    return best_model, metrics, "randomforest"
 
 
 def create_diagnostic_plots(y_test, y_pred, model_name, output_dir):
@@ -482,7 +466,7 @@ def create_diagnostic_plots(y_test, y_pred, model_name, output_dir):
     plt.savefig(output_dir / f'{model_name}_residual_vs_pred.png', dpi=150)
     plt.close()
 
-    logger.info(f"Saved diagnostic plots for {model_name}")
+    logger.info("Saved diagnostic plots for %s", model_name)
 
 
 def bootstrap_confidence_interval(y_true, y_pred, metric_func,
@@ -540,7 +524,7 @@ def main():
     logger.info("=" * 80)
 
     set_random_seeds(RANDOM_SEED)
-    logger.info(f"Random seed: {RANDOM_SEED}")
+    logger.info("Random seed: %d", RANDOM_SEED)
 
     artifact_dir = config.get_artifact_dir()
     save_config(config, artifact_dir / 'config.yaml')
@@ -554,7 +538,7 @@ def main():
         logger.info("=" * 80)
 
         df, data_mode = load_data(config)
-        logger.info(f"Data mode: {data_mode}")
+        logger.info("Data mode: %s", data_mode)
 
         with open(artifact_dir / 'data_info.txt', 'w') as f:
             f.write(f"Data mode: {data_mode}\n")
@@ -587,8 +571,8 @@ def main():
             test_df, all_features, config.features.target_column
         )
 
-        logger.info(f"Training set: {X_train.shape}")
-        logger.info(f"Test set: {X_test.shape}")
+        logger.info("Training set: %s", X_train.shape)
+        logger.info("Test set: %s", X_test.shape)
 
         # ---- MODEL TRAINING ----
         logger.info("\n" + "=" * 80)
@@ -689,7 +673,8 @@ def main():
                 }
             else:
                 logger.warning(
-                    f"Only {len(res_line)} test obs for {line_name}, using global quantiles"
+                    "Only %d test obs for %s, using global quantiles",
+                    len(res_line), line_name,
                 )
 
         # compute training-set means for network features so inference predictor
@@ -742,12 +727,15 @@ def main():
         mae_point, mae_lower, mae_upper = bootstrap_confidence_interval(
             y_test, y_pred_best, mean_absolute_error, block_size=block_size
         )
+        _rmse = lambda y_t, y_p: float(np.sqrt(mean_squared_error(y_t, y_p)))
         rmse_point, rmse_lower, rmse_upper = bootstrap_confidence_interval(
             y_test, y_pred_best, _rmse, block_size=block_size
         )
 
-        logger.info(f"Best model Test MAE: {mae_point:.3f} (95% CI: [{mae_lower:.3f}, {mae_upper:.3f}])")
-        logger.info(f"Best model Test RMSE: {rmse_point:.3f} (95% CI: [{rmse_lower:.3f}, {rmse_upper:.3f}])")
+        logger.info("Best model Test MAE:  %.3f (95%% CI: [%.3f, %.3f])",
+                    mae_point, mae_lower, mae_upper)
+        logger.info("Best model Test RMSE: %.3f (95%% CI: [%.3f, %.3f])",
+                    rmse_point, rmse_lower, rmse_upper)
 
         all_metrics['best']['test_mae_ci'] = [mae_lower, mae_upper]
         all_metrics['best']['test_rmse_ci'] = [rmse_lower, rmse_upper]
@@ -768,9 +756,37 @@ def main():
 
         for name, model in models.items():
             joblib.dump(model, artifact_dir / f'{name}_model.pkl')
-            logger.info(f"Saved {name} model")
+            logger.info("Saved %s model", name)
 
         save_metrics(all_metrics, artifact_dir / 'all_metrics.json')
+
+        # Save CV fold scores so the dashboard can load them cheaply instead
+        # of re-running cross_val_score on first visit.
+        logger.info("\n--- Saving CV fold scores ---")
+        _tscv_save = TimeSeriesSplit(n_splits=config.models.cv_splits)
+        _cv_raw = cross_val_score(
+            models['best'], X_train, y_train,
+            cv=_tscv_save, scoring='neg_mean_absolute_error', n_jobs=1,
+        )
+        cv_fold_scores = {
+            'mean': float(np.mean(-_cv_raw)),
+            'std':  float(np.std(-_cv_raw)),
+            'folds': [
+                {
+                    'fold': i + 1,
+                    'train_n': int(len(tr)),
+                    'val_n':   int(len(va)),
+                    'mae':     float(-s),
+                }
+                for i, ((tr, va), s) in enumerate(
+                    zip(_tscv_save.split(X_train), _cv_raw)
+                )
+            ],
+        }
+        with open(artifact_dir / 'cv_fold_scores.json', 'w') as f:
+            json.dump(cv_fold_scores, f, indent=2)
+        logger.info("Saved CV fold scores (mean MAE=%.4f ± %.4f)",
+                    cv_fold_scores['mean'], cv_fold_scores['std'])
 
         test_predictions = pd.DataFrame({
             'timestamp': test_df['timestamp'].values,
@@ -849,15 +865,16 @@ def main():
         logger.info("\n" + "=" * 80)
         logger.info("TRAINING COMPLETE")
         logger.info("=" * 80)
-        logger.info(f"Total time: {format_duration(elapsed)}")
-        logger.info(f"Artifact directory: {artifact_dir}")
-        logger.info(f"Best model: {best_model_name}")
-        logger.info(f"Best model Test MAE: {all_metrics['best']['test_mae']:.3f} severity units")
-        logger.info(f"Improvement over naive: {(1 - all_metrics['best']['test_mae']/all_metrics['naive']['test_mae'])*100:.1f}%")
+        logger.info("Total time: %s", format_duration(elapsed))
+        logger.info("Artifact directory: %s", artifact_dir)
+        logger.info("Best model: %s", best_model_name)
+        logger.info("Best model Test MAE: %.3f severity units", all_metrics['best']['test_mae'])
+        logger.info("Improvement over naive: %.1f%%",
+                    (1 - all_metrics['best']['test_mae'] / all_metrics['naive']['test_mae']) * 100)
         logger.info("=" * 80)
 
     except Exception as e:
-        logger.error(f"Training failed: {e}", exc_info=True)
+        logger.error("Training failed: %s", e, exc_info=True)
         raise
 
 

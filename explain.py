@@ -40,7 +40,7 @@ def load_artifacts(artifact_dir: Path) -> dict:
         model_path = artifact_dir / f'{model_name}_model.pkl'
         if model_path.exists():
             artifacts[f'{model_name}_model'] = joblib.load(model_path)
-            logger.info(f"Loaded {model_name} model")
+            logger.info("Loaded %s model", model_name)
 
     artifacts['feature_metadata'] = load_feature_metadata(artifact_dir)
 
@@ -138,11 +138,20 @@ def create_shap_explainer(model, X_background, config):
         return explainer
 
     except Exception as e:
-        logger.error(f"Failed to create SHAP explainer: {e}")
+        logger.error("create_shap_explainer failed: %s", e)
         return None
 
 
-def compute_shap_values(explainer, model, X, config, max_samples=None):
+def compute_shap_values(explainer, pipeline, X, config, max_samples=None):
+    """Compute SHAP values for X, transforming through the pipeline preprocessor first.
+
+    Args:
+        explainer: SHAP Explainer built on the raw regressor (post-transform).
+        pipeline:  Full sklearn Pipeline — used only to extract the preprocessor
+                   so X can be transformed before being passed to the explainer.
+                   The explainer already contains the regressor; pipeline is NOT
+                   called for prediction here.
+    """
     if explainer is None:
         return None
 
@@ -154,13 +163,13 @@ def compute_shap_values(explainer, model, X, config, max_samples=None):
         else:
             X_sample = X
 
-        if hasattr(model, 'named_steps'):
-            preprocessor = model.named_steps.get('preprocessor')
+        if hasattr(pipeline, 'named_steps'):
+            preprocessor = pipeline.named_steps.get('preprocessor')
             X_transformed = preprocessor.transform(X_sample) if preprocessor else X_sample
         else:
             X_transformed = X_sample
 
-        logger.info(f"Computing SHAP values for {len(X_sample)} samples...")
+        logger.info("Computing SHAP values for %d samples...", len(X_sample))
         try:
             shap_values = explainer(X_transformed, check_additivity=False)
         except TypeError:
@@ -170,8 +179,17 @@ def compute_shap_values(explainer, model, X, config, max_samples=None):
         return shap_values
 
     except Exception as e:
-        logger.error(f"Failed to compute SHAP values: {e}")
+        logger.error("compute_shap_values failed: %s", e)
         return None
+
+
+def _to_shap_array(shap_values) -> np.ndarray:
+    """Extract the raw (n_samples, n_features) numpy array from a SHAP result.
+
+    SHAP ≥0.40 returns an Explanation object with a .values attribute;
+    older versions return the array directly.
+    """
+    return shap_values.values if hasattr(shap_values, 'values') else shap_values
 
 
 def create_shap_plots(shap_values, feature_names, output_dir, config):
@@ -202,17 +220,18 @@ def create_shap_plots(shap_values, feature_names, output_dir, config):
                 exp_i.feature_names = feature_names
                 plt.figure(figsize=(10, 8))
                 shap.plots.waterfall(exp_i, max_display=config.explainability.top_n_features, show=False)
-                plt.savefig(output_dir / f'shap_waterfall_example_{i}.png', dpi=72)
+                plt.savefig(output_dir / f'shap_waterfall_example_{i}.png', dpi=150)
                 plt.close()
                 waterfall_saved += 1
             except Exception as we:
-                logger.warning(f"Waterfall plot {i} skipped: {we}", exc_info=True)
+                logger.warning("create_shap_plots: waterfall %d skipped: %s", i, we,
+                               exc_info=True)
                 plt.close()
 
-        logger.info(f"Created {waterfall_saved} waterfall plots")
+        logger.info("Created %d waterfall plots", waterfall_saved)
 
     except Exception as e:
-        logger.error(f"Failed to create SHAP plots: {e}", exc_info=True)
+        logger.error("create_shap_plots failed: %s", e, exc_info=True)
 
 
 def generate_text_explanations(shap_values, feature_names, X, y_pred, config):
@@ -222,7 +241,7 @@ def generate_text_explanations(shap_values, feature_names, X, y_pred, config):
 
     explanations = []
     try:
-        shap_array = shap_values.values if hasattr(shap_values, 'values') else shap_values
+        shap_array = _to_shap_array(shap_values)
         n_examples = min(config.explainability.n_local_examples, len(shap_array))
 
         for i in range(n_examples):
@@ -241,19 +260,27 @@ def generate_text_explanations(shap_values, feature_names, X, y_pred, config):
             explanations.append(explanation)
 
     except Exception as e:
-        logger.error(f"Text explanation failed: {e}")
-        explanations = [f"Error: {e}"]
+        logger.error("generate_text_explanations failed: %s", e)
+        explanations = ["Error generating text explanations: %s" % e]
 
     return explanations
 
 
-def create_feature_importance_plot(shap_values, feature_names, output_dir, config):
+def create_feature_importance_plot(shap_values, feature_names, output_dir, config,
+                                   mean_abs_shap=None):
+    """Plot and save mean |SHAP| feature importances.
+
+    Args:
+        mean_abs_shap: optional pre-computed (n_features,) array — pass this
+            when the caller already holds the value to avoid recomputing it.
+            If None, it is computed from shap_values here.
+    """
     if shap_values is None:
         return
 
     try:
-        shap_array = shap_values.values if hasattr(shap_values, 'values') else shap_values
-        mean_abs_shap = np.abs(shap_array).mean(axis=0)
+        if mean_abs_shap is None:
+            mean_abs_shap = np.abs(_to_shap_array(shap_values)).mean(axis=0)
 
         importance_df = pd.DataFrame({
             'feature': feature_names[:len(mean_abs_shap)],
@@ -273,7 +300,7 @@ def create_feature_importance_plot(shap_values, feature_names, output_dir, confi
         logger.info("Created feature importance plot")
 
     except Exception as e:
-        logger.error(f"Feature importance plot failed: {e}")
+        logger.error("create_feature_importance_plot failed: %s", e)
 
 
 def main():
@@ -290,7 +317,7 @@ def main():
     run_logger.info("\n" + "=" * 80)
     run_logger.info("Explainability Pipeline")
     run_logger.info("=" * 80)
-    run_logger.info(f"Using artifacts from: {latest_run_id}")
+    run_logger.info("Using artifacts from: %s", latest_run_id)
 
     set_random_seeds(RANDOM_SEED)
     start_time = time.time()
@@ -328,7 +355,7 @@ def main():
             explainer = create_shap_explainer(best_model, X_train, config)
             shap_values = compute_shap_values(
                 explainer, best_model, X_test, config,
-                max_samples=config.explainability.shap_background_size
+                max_samples=config.explainability.shap_background_size,
             )
 
             # get feature names from preprocessor
@@ -341,10 +368,17 @@ def main():
 
             save_shap_cache(artifact_dir, X_test, shap_values, feature_names)
 
-        # plots
+        # plots — compute mean |SHAP| once and share across both plot functions
         run_logger.info("\n--- Creating Plots ---")
+        _mean_abs = (
+            np.abs(_to_shap_array(shap_values)).mean(axis=0)
+            if shap_values is not None else None
+        )
         create_shap_plots(shap_values, feature_names, artifact_dir, config)
-        create_feature_importance_plot(shap_values, feature_names, artifact_dir, config)
+        create_feature_importance_plot(
+            shap_values, feature_names, artifact_dir, config,
+            mean_abs_shap=_mean_abs,
+        )
 
         # text explanations
         y_pred = best_model.predict(X_test)
@@ -373,10 +407,10 @@ def main():
         elapsed = time.time() - start_time
         run_logger.info("\n" + "=" * 80)
         run_logger.info("EXPLAINABILITY COMPLETE")
-        run_logger.info(f"Total time: {format_duration(elapsed)}")
+        run_logger.info("Total time: %s", format_duration(elapsed))
 
     except Exception as e:
-        run_logger.error(f"Explainability pipeline failed: {e}", exc_info=True)
+        run_logger.error("Explainability pipeline failed: %s", e, exc_info=True)
         raise
 
 

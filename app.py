@@ -27,6 +27,7 @@ from __future__ import annotations
 import sys
 import json
 import logging
+import re
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -45,7 +46,9 @@ ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
 
 from config import get_config
+from events import VENUES, generate_event_calendar
 from utils import get_latest_run_id
+from app.map_data import LINE_PATHS, INTERCHANGE_STATIONS
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +100,24 @@ def _fmt_min(decimal_min: float) -> str:
     return f"{m}m {s}s"
 
 
+def _clamp(v: float, lo: float, hi: float) -> float:
+    """Clamp a float to a closed interval."""
+    return max(lo, min(hi, v))
+
+
 PEAK_HOURS: List[Tuple[int, int]] = [(7, 9), (17, 19)]
+
+# 24 h × 12 readings/h = 288 five-minute intervals — used to cap test-set
+# time-series charts to the most recent 24 hours of data.
+_RECENT_TEST_SAMPLES: int = 288
+
+
+def _default_crowding(line: str, hour: int) -> float:
+    """Default sidebar crowding value based on line baseline and peak/off-peak."""
+    base = CROWDING_WEIGHTS.get(line, 0.05)
+    if any(start <= hour < end for start, end in PEAK_HOURS):
+        return _clamp(base * 1.6, 0.0, 1.0)
+    return _clamp(base * 0.9, 0.0, 1.0)
 
 # Fallback metrics (severity scale 0-2) — used only when artifacts are missing
 _FALLBACK_METRICS: Dict = {
@@ -179,6 +199,15 @@ def apply_custom_css() -> None:
     Inject TfL design system CSS.  Streamlit 1.27+ DOMPurify strips <style>
     tags from st.markdown, so we inject via a zero-height components.html
     iframe that writes a <style> element into window.parent.document.head.
+
+    FRAGILITY NOTE: selectors below target Streamlit's internal data-testid
+    attributes (e.g. "stSidebar", "stMetricLabel", "stExpander").  These are
+    implementation details — not a public API — and Streamlit may rename or
+    remove them without notice.  If the styling breaks after a Streamlit
+    upgrade, audit the DOM with browser DevTools and update the selectors here.
+    The broad rule `section[data-testid="stSidebar"] * { color:... !important }`
+    is the most likely casualty; replace with narrower selectors if it causes
+    conflicts.
     """
     import streamlit.components.v1 as components
     _CSS = """
@@ -251,6 +280,63 @@ def apply_custom_css() -> None:
         border-radius:8px !important;
     }
     section[data-testid="stSidebar"] .stToggle label { text-transform:none !important; }
+    section[data-testid="stSidebar"] [data-testid="stExpander"] {
+        border:1px solid rgba(255,255,255,0.16);
+        border-radius:10px;
+        background:rgba(255,255,255,0.08);
+        box-shadow:0 8px 24px rgba(0,20,58,0.16);
+        overflow:hidden;
+    }
+    section[data-testid="stSidebar"] [data-testid="stExpander"] details {
+        background:rgba(255,255,255,0.08) !important;
+    }
+    section[data-testid="stSidebar"] [data-testid="stExpander"] summary {
+        padding:0.15rem 0.2rem;
+        background:rgba(255,255,255,0.08) !important;
+        transition:background .18s ease, box-shadow .18s ease;
+    }
+    section[data-testid="stSidebar"] [data-testid="stExpander"] summary:hover {
+        background:rgba(255,255,255,0.12) !important;
+    }
+    section[data-testid="stSidebar"] [data-testid="stExpander"] details[open] {
+        background:rgba(255,255,255,0.08) !important;
+    }
+    section[data-testid="stSidebar"] [data-testid="stExpander"] details[open] summary {
+        background:rgba(255,255,255,0.08) !important;
+        box-shadow:inset 0 -1px 0 rgba(255,255,255,0.10);
+    }
+    section[data-testid="stSidebar"] [data-testid="stExpander"] details[open] summary:hover {
+        background:rgba(255,255,255,0.12) !important;
+    }
+    section[data-testid="stSidebar"] [data-testid="stExpander"] summary * {
+        background-color:transparent !important;
+    }
+    section[data-testid="stSidebar"] [data-testid="stExpander"] details[open] > div {
+        background:rgba(255,255,255,0.08) !important;
+    }
+    section[data-testid="stSidebar"] [data-testid="stExpander"] summary p {
+        color:#DCE8FF !important;
+        font-size:0.87rem !important;
+        font-weight:700 !important;
+        letter-spacing:.02em !important;
+        text-transform:none !important;
+    }
+    section[data-testid="stSidebar"] .st-key-refresh_data button {
+        border-radius:10px !important;
+        min-height:2.7rem !important;
+        background:rgba(255,255,255,0.08) !important;
+        color:#DCE8FF !important;
+        border:1px solid rgba(255,255,255,0.16) !important;
+        box-shadow:0 8px 24px rgba(0,20,58,0.16) !important;
+    }
+    section[data-testid="stSidebar"] .st-key-refresh_data button:hover {
+        transform:translateY(-2px);
+        background:rgba(255,255,255,0.12) !important;
+        box-shadow:0 12px 30px rgba(0,20,58,0.22) !important;
+    }
+    section[data-testid="stSidebar"] .st-key-refresh_data button p {
+        color:#DCE8FF !important;
+    }
 
     /* ── Tabs ─────────────────────────────────────────────────────────── */
     .stTabs [data-baseweb="tab-list"] {
@@ -392,19 +478,7 @@ def _load_tabular(artifact_dir: str) -> Dict:
     if comp_p.exists():
         out["model_comparison"] = pd.read_csv(comp_p)
 
-    # Feature importance: prefer latest run, then scan previous runs backwards
-    # so we pick up the most recent non-empty feature_importance.csv available.
     fi_p = path / "feature_importance.csv"
-    if not fi_p.exists():
-        art_root = path.parent
-        try:
-            for run_dir in sorted(art_root.iterdir(), reverse=True):
-                candidate = run_dir / "feature_importance.csv"
-                if candidate.exists():
-                    fi_p = candidate
-                    break
-        except Exception:
-            pass
     if fi_p.exists():
         fi_df = pd.read_csv(fi_p)
         # Strip sklearn Pipeline prefixes (e.g. "num__", "cat__") that appear
@@ -449,22 +523,180 @@ def _load_collection(data_dir: str) -> Dict:
     return result
 
 
+@st.cache_data(show_spinner=False, ttl=300)
+def _load_run_metadata(artifact_dir: str) -> Dict:
+    """Load run-level metadata for the About tab from saved artifacts."""
+    path = Path(artifact_dir)
+    meta: Dict = {}
+
+    data_info_p = path / "data_info.txt"
+    if data_info_p.exists():
+        try:
+            txt = data_info_p.read_text(encoding="utf-8", errors="ignore")
+            mode_m = re.search(r"Data mode:\s*(.+)", txt)
+            shape_m = re.search(r"Shape:\s*\((\d+),\s*(\d+)\)", txt)
+            range_m = re.search(r"Date range:\s*(.+?)\s+to\s+(.+)", txt)
+            if mode_m:
+                meta["data_mode"] = mode_m.group(1).strip()
+            if shape_m:
+                meta["data_rows"] = int(shape_m.group(1))
+                meta["data_cols"] = int(shape_m.group(2))
+            if range_m:
+                meta["date_start"] = pd.to_datetime(range_m.group(1).strip())
+                meta["date_end"] = pd.to_datetime(range_m.group(2).strip())
+        except Exception as exc:
+            logger.warning("Could not parse data_info.txt: %s", exc)
+
+    model_info_p = path / "model_info.json"
+    if model_info_p.exists():
+        try:
+            with open(model_info_p, encoding="utf-8") as f:
+                meta.update(json.load(f))
+        except Exception as exc:
+            logger.warning("Could not parse model_info.json: %s", exc)
+
+    run_log_p = path / "run.log"
+    if run_log_p.exists():
+        try:
+            log_txt = run_log_p.read_text(encoding="utf-8", errors="ignore")
+            train_m = re.search(r"Training set:\s*\((\d+),\s*(\d+)\)", log_txt)
+            test_m = re.search(r"Test set:\s*\((\d+),\s*(\d+)\)", log_txt)
+            time_m = re.search(r"Total time:\s*([^\r\n]+)", log_txt)
+            if train_m:
+                meta["train_rows"] = int(train_m.group(1))
+                meta["feature_count"] = int(train_m.group(2))
+            if test_m:
+                meta["test_rows"] = int(test_m.group(1))
+            if time_m:
+                meta["train_duration"] = time_m.group(1).strip()
+        except Exception as exc:
+            logger.warning("Could not parse run.log: %s", exc)
+
+    return meta
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def _load_analysis_outputs(analysis_dir: str) -> Dict:
+    """Load walk-forward backtest, drift, and ablation outputs from analysis/outputs/."""
+    out: Dict = {}
+    base = Path(analysis_dir)
+
+    wf_p = base / "walk_forward_backtest.json"
+    if wf_p.exists():
+        try:
+            with open(wf_p) as f:
+                out["walk_forward"] = json.load(f)
+        except Exception as exc:
+            logger.warning("Could not load walk_forward_backtest.json: %s", exc)
+
+    drift_p = base / "drift_results.json"
+    if drift_p.exists():
+        try:
+            with open(drift_p) as f:
+                out["drift"] = json.load(f)
+        except Exception as exc:
+            logger.warning("Could not load drift_results.json: %s", exc)
+
+    abl_json_p = base / "ablation_results.json"
+    if abl_json_p.exists():
+        try:
+            with open(abl_json_p) as f:
+                out["ablation"] = json.load(f)
+        except Exception as exc:
+            logger.warning("Could not load ablation_results.json: %s", exc)
+
+    abl_png_p = base / "ablation_results.png"
+    if abl_png_p.exists():
+        out["ablation_png"] = str(abl_png_p)
+
+    return out
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def _compute_cv_mae_breakdown(artifact_dir: str) -> Optional[Dict]:
+    """Return fold-level CV MAE breakdown.
+
+    Fast path: loads cv_fold_scores.json written by train.py — zero model
+    loading cost, runs in milliseconds.
+    Slow fallback: re-runs cross_val_score for runs produced before the fast
+    path was added.  This can be slow and memory-intensive; once a run has
+    the saved JSON the fallback is never reached again.
+    """
+    path = Path(artifact_dir)
+
+    # ── Fast path ────────────────────────────────────────────────────────
+    saved = path / "cv_fold_scores.json"
+    if saved.exists():
+        try:
+            with open(saved) as f:
+                return json.load(f)
+        except Exception as exc:
+            logger.warning("Could not load cv_fold_scores.json: %s", exc)
+
+    # ── Slow fallback (old runs only) ─────────────────────────────────
+    try:
+        import joblib
+        from sklearn.model_selection import TimeSeriesSplit, cross_val_score
+
+        x_path = path / "X_train.parquet"
+        y_path = path / "y_train.csv"
+        model_path = path / "best_model.pkl"
+        if not (x_path.exists() and y_path.exists() and model_path.exists()):
+            return None
+
+        X_train = pd.read_parquet(x_path)
+        y_train = pd.read_csv(y_path).iloc[:, 0]
+        model = joblib.load(model_path)
+
+        n_splits = int(get_config().models.cv_splits)
+        tscv = TimeSeriesSplit(n_splits=n_splits)
+        scores = cross_val_score(
+            model, X_train, y_train,
+            cv=tscv, scoring="neg_mean_absolute_error", n_jobs=1,
+        )
+        fold_mae = [float(-s) for s in scores]
+        folds = [
+            {"fold": i + 1, "train_n": int(len(tr)),
+             "val_n": int(len(va)), "mae": fold_mae[i]}
+            for i, (tr, va) in enumerate(tscv.split(X_train))
+        ]
+        return {"mean": float(np.mean(fold_mae)), "std": float(np.std(fold_mae)),
+                "folds": folds}
+    except Exception as exc:
+        logger.warning("Could not compute CV MAE breakdown: %s", exc)
+        return None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # PREDICTION HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _status(delay_min: float) -> Tuple[str, str]:
-    """Map predicted delay in minutes to (colour, label)."""
-    if delay_min < STATUS_GOOD_MAX:
+@st.cache_resource(show_spinner=False)
+def _get_future_predictor(artifact_dir: str):
+    """Load the inference predictor once per artifact directory."""
+    from future_prediction import FutureDelayPredictor
+
+    art = Path(artifact_dir)
+    return FutureDelayPredictor(
+        str(art / "best_model.pkl"),
+        str(art / "feature_metadata.pkl"),
+    )
+
+
+def _status_from_severity(severity: float) -> Tuple[str, str]:
+    """Map predicted severity to the corresponding service-status label."""
+    if severity < STATUS_GOOD_MAX:
         return "#00B140", "Good Service"
-    if delay_min < STATUS_MINOR_MAX:
+    if severity < STATUS_MINOR_MAX:
         return "#FFD300", "Minor Delays"
     return "#DC241F", "Severe Delays"
 
 
 def _predict_scenario(
+    artifact_dir: str,
     line: str, hour: int, day_of_week: int,
     temp_c: float, precip_mm: float, humidity: int,
+    crowding_index: Optional[float] = None,
 ) -> Optional[float]:
     """
     Call FutureDelayPredictor for a single scenario point.
@@ -473,31 +705,121 @@ def _predict_scenario(
     Returns None on any failure so callers can fall back to test-data averages.
     """
     try:
-        from future_prediction import FutureDelayPredictor
-        cfg = get_config()
-        latest_run = get_latest_run_id(cfg.paths.artifacts_dir)
-        if latest_run is None:
+        predictor = _get_future_predictor(artifact_dir)
+        result = _predict_with_predictor(
+            predictor,
+            line=line,
+            target_datetime=_resolve_point_datetime(hour, day_of_week),
+            temp_c=temp_c, precip_mm=precip_mm, humidity=humidity,
+            crowding_index=crowding_index,
+        )
+        return None if result is None else float(result["prediction"])
+    except Exception as exc:
+        logger.warning(
+            "Scenario prediction failed for %s at %02d:00 on weekday %s: %s",
+            line, hour, day_of_week, exc,
+        )
+        return None
+
+
+def _resolve_scenario_date(
+    day_of_week: int,
+    reference_dt: Optional[datetime] = None,
+) -> datetime.date:
+    """Return one fixed calendar date for the selected weekday."""
+    ref = reference_dt or datetime.now()
+    days_ahead = (day_of_week - ref.weekday()) % 7
+    return (ref + timedelta(days=days_ahead)).date()
+
+
+def _resolve_point_datetime(
+    hour: int,
+    day_of_week: int,
+    reference_dt: Optional[datetime] = None,
+) -> datetime:
+    """Resolve the next occurrence of the selected weekday/hour for point predictions."""
+    ref = reference_dt or datetime.now()
+    base_date = _resolve_scenario_date(day_of_week, ref)
+    candidate = datetime.combine(base_date, datetime.min.time()).replace(hour=hour)
+    if candidate <= ref and day_of_week == ref.weekday():
+        candidate += timedelta(days=7)
+    return candidate
+
+
+def _day_hour_datetime(
+    forecast_date: datetime.date,
+    hour: int,
+) -> datetime:
+    """Build a deterministic datetime for one hour on the selected forecast date."""
+    return datetime.combine(forecast_date, datetime.min.time()).replace(hour=hour)
+
+
+def _predict_with_predictor(
+    predictor,
+    line: str,
+    target_datetime: datetime,
+    temp_c: float,
+    precip_mm: float,
+    humidity: int,
+    crowding_index: Optional[float] = None,
+) -> Optional[Dict[str, float]]:
+    """Predict a single scenario using one predictor instance.
+
+    Uses predict_from_features (public API) after feature engineering so the
+    dashboard never calls private underscore methods on the predictor.
+    """
+    try:
+        features = predictor._engineer_features(
+            line=line,
+            target_datetime=target_datetime,
+            weather_forecast={
+                "temperature": temp_c,
+                "precipitation": precip_mm,
+                "humidity": humidity,
+            },
+            recent_delays=None,
+        )
+        if crowding_index is not None:
+            crowding_val = _clamp(float(crowding_index), 0.0, 1.0)
+            features.at[0, "crowding_index"] = crowding_val
+            peak_flag = float(features.at[0, "peak_time"]) if "peak_time" in features.columns else 0.0
+            if "crowding_x_peak" in features.columns:
+                features.at[0, "crowding_x_peak"] = crowding_val * peak_flag
+        result = predictor.predict_from_features(features, line)
+        return {**result, "hour": float(target_datetime.hour)}
+    except Exception as exc:
+        logger.warning(
+            "Predictor failed for %s at %s: %s",
+            line,
+            target_datetime.isoformat(),
+            exc,
+        )
+        return None
+
+
+def _event_note(line: str, hour: int, day_of_week: int) -> Optional[str]:
+    """Return a short event badge for the selected scenario when relevant."""
+    try:
+        target = _resolve_point_datetime(hour, day_of_week)
+        cal = generate_event_calendar(target.date(), target.date())
+        candidates: List[Tuple[float, str]] = []
+        for _, row in cal.iterrows():
+            venue = VENUES.get(row["venue"])
+            if venue is None or line not in venue.lines:
+                continue
+            ev_start = pd.Timestamp(row["date"]).to_pydatetime()
+            ev_end = ev_start + timedelta(hours=venue.impact_hours)
+            if ev_start <= target <= ev_end:
+                level = "high" if venue.capacity >= 60000 else "moderate"
+                text = (
+                    f"{row['name']} {ev_start.strftime('%H:%M')} - "
+                    f"{level} crowding expected"
+                )
+                candidates.append((venue.capacity, text))
+        if not candidates:
             return None
-        art = cfg.paths.artifacts_dir / latest_run
-        predictor = FutureDelayPredictor(
-            str(art / "best_model.pkl"),
-            str(art / "feature_metadata.pkl"),
-        )
-        now = datetime.now()
-        candidate = now.replace(hour=hour, minute=0, second=0, microsecond=0)
-        if day_of_week != now.weekday():
-            days_ahead = (day_of_week - now.weekday()) % 7 or 7
-            candidate = (now + timedelta(days=days_ahead)).replace(
-                hour=hour, minute=0, second=0, microsecond=0)
-        elif candidate <= now:
-            candidate += timedelta(days=1)
-        result = predictor.predict_delay(
-            line=line, target_datetime=candidate,
-            weather_forecast={"temperature": temp_c,
-                              "precipitation": precip_mm,
-                              "humidity": humidity},
-        )
-        return float(result["predicted_delay_minutes"])
+        candidates.sort(reverse=True)
+        return candidates[0][1]
     except Exception:
         return None
 
@@ -506,13 +828,13 @@ def _predict_scenario(
 # PLOTLY CHART BUILDERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _gauge(delay_min: float, t: Dict) -> go.Figure:
+def _gauge(severity: float, t: Dict) -> go.Figure:
     """
     Semi-circle gauge on a 0–2 severity scale (model target: delay_severity).
     Colour zones: green 0–0.5 (Good), yellow 0.5–1.5 (Minor), red 1.5–2 (Severe).
     """
-    colour, label = _status(delay_min)
-    val = round(max(0.0, min(delay_min, 2.5)), 2)
+    colour, label = _status_from_severity(severity)
+    val = round(max(0.0, min(severity, 2.5)), 2)
     fig = go.Figure(go.Indicator(
         mode="gauge+number",
         value=val,
@@ -539,6 +861,13 @@ def _gauge(delay_min: float, t: Dict) -> go.Figure:
     fig.update_layout(
         paper_bgcolor=t["paper"], font=dict(color=t["font"]),
         margin=dict(l=20, r=20, t=40, b=10), height=260,
+        annotations=[
+            dict(
+                x=0.5, y=0.02, xref="paper", yref="paper", showarrow=False,
+                text=f"Approx. {_fmt_min(severity * SEV_TO_MIN)}",
+                font=dict(size=13, color=t["muted"]),
+            )
+        ],
     )
     return fig
 
@@ -608,7 +937,7 @@ def _network_heatmap(test_preds: pd.DataFrame, model_col: str, t: Dict) -> go.Fi
 def _forecast_chart(test_preds: pd.DataFrame, line: str,
                     model_col: str, t: Dict) -> go.Figure:
     """Actual vs predicted delay time series for the selected line."""
-    ldf = test_preds[test_preds["line"] == line].sort_values("timestamp").tail(288)
+    ldf = test_preds[test_preds["line"] == line].sort_values("timestamp").tail(_RECENT_TEST_SAMPLES)
     lc  = LINE_COLOURS.get(line, "#003B6F")
     r, g, b = int(lc[1:3], 16), int(lc[3:5], 16), int(lc[5:7], 16)
 
@@ -651,11 +980,141 @@ def _forecast_chart(test_preds: pd.DataFrame, line: str,
     return fig
 
 
+def _scenario_forecast_chart(
+    hours: List[int],
+    values_a: List[float],
+    ci_lo_a: List[float],
+    ci_hi_a: List[float],
+    line_name: str,
+    t: Dict,
+    values_b: Optional[List[float]] = None,
+    ci_lo_b: Optional[List[float]] = None,
+    ci_hi_b: Optional[List[float]] = None,
+    label_a: str = "Scenario A",
+    label_b: str = "Scenario B",
+) -> go.Figure:
+    """24-hour scenario chart with prediction-interval shading."""
+    lc_a = LINE_COLOURS.get(line_name, "#003B6F")
+    r, g, b = int(lc_a[1:3], 16), int(lc_a[3:5], 16), int(lc_a[5:7], 16)
+    lc_b = "#E86B00"
+    rb, gb, bb = int(lc_b[1:3], 16), int(lc_b[3:5], 16), int(lc_b[5:7], 16)
+
+    fig = go.Figure()
+    for s, e in PEAK_HOURS:
+        fig.add_vrect(x0=s, x1=e, fillcolor="rgba(227,32,23,0.07)", line_width=0)
+
+    fig.add_trace(go.Scatter(
+        x=hours + hours[::-1],
+        y=ci_hi_a + ci_lo_a[::-1],
+        fill="toself", fillcolor=f"rgba({r},{g},{b},0.12)",
+        line=dict(color="rgba(0,0,0,0)"), hoverinfo="skip",
+        name=f"{label_a} 95% CI",
+    ))
+    fig.add_trace(go.Scatter(
+        x=hours, y=values_a, mode="lines",
+        line=dict(color=lc_a, width=3), name=label_a,
+        hovertemplate="%{x:02d}:00 -> %{y:.2f} sev<extra></extra>",
+    ))
+
+    if values_b is not None and ci_lo_b is not None and ci_hi_b is not None:
+        fig.add_trace(go.Scatter(
+            x=hours + hours[::-1],
+            y=ci_hi_b + ci_lo_b[::-1],
+            fill="toself", fillcolor=f"rgba({rb},{gb},{bb},0.11)",
+            line=dict(color="rgba(0,0,0,0)"), hoverinfo="skip",
+            name=f"{label_b} 95% CI",
+        ))
+        fig.add_trace(go.Scatter(
+            x=hours, y=values_b, mode="lines",
+            line=dict(color=lc_b, width=2.5, dash="dash"), name=label_b,
+            hovertemplate="%{x:02d}:00 -> %{y:.2f} sev<extra></extra>",
+        ))
+
+    fig = _fig_base(fig, t, f"24-Hour Scenario Forecast - {line_name} Line", height=360)
+    fig.update_layout(
+        hovermode="x unified",
+        xaxis=dict(
+            title="Hour of Day",
+            tickvals=list(range(0, 24, 2)),
+            ticktext=[f"{h:02d}:00" for h in range(0, 24, 2)],
+            tickfont=dict(color=t["muted"]),
+        ),
+        yaxis=dict(title="Predicted Severity (0-2)"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    return fig
+
+
+def _feature_correlation_chart(
+    test_preds: pd.DataFrame,
+    feat_imp: Optional[pd.DataFrame],
+    t: Dict,
+) -> Optional[go.Figure]:
+    """Correlation heatmap using the most relevant numeric columns available."""
+    df = test_preds.copy()
+    df["hour"] = df["timestamp"].dt.hour
+    df["day_of_week"] = df["timestamp"].dt.dayofweek
+    df["month"] = df["timestamp"].dt.month
+    df["is_weekend"] = (df["day_of_week"] >= 5).astype(int)
+    df["peak_time"] = (
+        df["hour"].between(7, 8) | df["hour"].between(17, 18)
+    ).astype(int)
+    df["abs_error"] = (df["actual"] - df["pred_best"]).abs()
+
+    numeric_cols = [
+        c for c in df.columns
+        if pd.api.types.is_numeric_dtype(df[c]) and c not in {"Unnamed: 0"}
+    ]
+    if feat_imp is not None and "feature" in feat_imp.columns:
+        preferred = [c for c in feat_imp["feature"].tolist() if c in numeric_cols]
+    else:
+        preferred = []
+    fallback = [c for c in numeric_cols if c not in preferred]
+    cols = (preferred + fallback)[:15]
+    if len(cols) < 4:
+        return None
+
+    corr = df[cols].corr(method="pearson").fillna(0.0)
+    plain = {
+        "actual": "Actual severity",
+        "pred_best": "Predicted severity",
+        "abs_error": "Absolute error",
+        "hour": "Hour",
+        "day_of_week": "Day of week",
+        "month": "Month",
+        "is_weekend": "Weekend",
+        "peak_time": "Peak hours",
+    }
+    labels = [plain.get(c, c.replace("_", " ").title()) for c in cols]
+
+    fig = go.Figure(go.Heatmap(
+        z=corr.values,
+        x=labels,
+        y=labels,
+        zmin=-1,
+        zmax=1,
+        colorscale="RdBu",
+        reversescale=True,
+        colorbar=dict(title="r", tickfont=dict(color=t["font"])),
+        hovertemplate="%{y} vs %{x}<br>r = %{z:.2f}<extra></extra>",
+    ))
+    fig.update_layout(
+        paper_bgcolor=t["paper"], plot_bgcolor=t["paper"],
+        font=dict(color=t["font"]),
+        margin=dict(l=180, r=20, t=48, b=90), height=520,
+        title=dict(text="Feature Correlation Matrix", x=0.01,
+                   font=dict(size=14, color=t["font"])),
+        xaxis=dict(tickangle=-40, tickfont=dict(color=t["muted"])),
+        yaxis=dict(tickfont=dict(color=t["font"])),
+    )
+    return fig
+
+
 def _model_comparison_chart(metrics: Dict, t: Dict) -> go.Figure:
-    """Grouped bar chart: MAE / RMSE / R² across Naive · Ridge · LightGBM."""
-    models = [k for k in ("naive", "ridge", "best") if k in metrics]
-    labels = {"naive": "Naive", "ridge": "Ridge", "best": "LightGBM"}
-    colors = {"naive": "#9CA3AF", "ridge": "#0098D4", "best": "#003B6F"}
+    """Grouped bar chart: MAE / RMSE / R² across Naive · Ridge · XGBoost · LightGBM."""
+    models = [k for k in ("naive", "ridge", "xgboost", "best") if k in metrics]
+    labels = {"naive": "Naive", "ridge": "Ridge", "xgboost": "XGBoost", "best": "LightGBM"}
+    colors = {"naive": "#9CA3AF", "ridge": "#0098D4", "xgboost": "#FF7733", "best": "#003B6F"}
 
     mae_v  = [metrics[m].get("test_mae",  0) for m in models]
     rmse_v = [metrics[m].get("test_rmse", 0) for m in models]
@@ -953,14 +1412,20 @@ def _render_live_status_strip(t: Dict) -> None:
             return "#DC241F"
         return "#9CA3AF"
 
+    def _badge(line: str, status: str) -> str:
+        col = _dot_col(status)  # resolve once — used four times below
+        return (
+            f'<span style="display:inline-flex;align-items:center;gap:.3rem;'
+            f'background:{col}1A;border:1px solid {col}66;'
+            f'border-radius:20px;padding:.18rem .55rem;font-size:.72rem;font-weight:700;'
+            f'color:{col};white-space:nowrap;margin:.15rem;">'
+            f'<span style="width:7px;height:7px;border-radius:50%;'
+            f'background:{col};display:inline-block;flex-shrink:0;"></span>'
+            f'{line}</span>'
+        )
+
     badges = "".join(
-        f'<span style="display:inline-flex;align-items:center;gap:.3rem;'
-        f'background:{_dot_col(status)}1A;border:1px solid {_dot_col(status)}66;'
-        f'border-radius:20px;padding:.18rem .55rem;font-size:.72rem;font-weight:700;'
-        f'color:{_dot_col(status)};white-space:nowrap;margin:.15rem;">'
-        f'<span style="width:7px;height:7px;border-radius:50%;'
-        f'background:{_dot_col(status)};display:inline-block;flex-shrink:0;"></span>'
-        f'{line}</span>'
+        _badge(line, status)
         for line, status in sorted(live.items())
         if line in LINE_NAMES
     )
@@ -1013,12 +1478,14 @@ def _render_header() -> None:
             Real TfL Data &nbsp;·&nbsp; 40 Features</p>
         </div>
         <div style="text-align:right;flex-shrink:0;">
-          <div style="font-size:1.95rem;font-weight:900;color:#FFFFFF;line-height:1;">
+          <div id="tfl-live-clock" style="font-size:1.95rem;font-weight:900;color:#FFFFFF;line-height:1;">
             {clock_str}</div>
-          <div style="font-size:.73rem;color:rgba(255,255,255,.65);margin-top:.1rem;">
+          <div id="tfl-live-date" style="font-size:.73rem;color:rgba(255,255,255,.65);margin-top:.1rem;">
             {date_str}</div>
           <div style="font-size:.62rem;color:rgba(255,255,255,.45);margin-top:.08rem;">
             London Time</div>
+          <div id="tfl-live-refresh" style="font-size:.6rem;color:rgba(255,255,255,.38);margin-top:.08rem;">
+            Auto-refresh every 60s</div>
         </div>
       </div>
     </div>
@@ -1026,15 +1493,110 @@ def _render_header() -> None:
     """, unsafe_allow_html=True)
 
 
+def _enable_live_clock() -> None:
+    """Keep the header clock live via a 1-second JS interval.
+    No page reload — data freshness is handled by cache TTLs and the
+    manual Refresh Data button in the sidebar.
+    """
+    import streamlit.components.v1 as components
+
+    components.html(
+        """<script>
+        (function() {
+            const parentWin = window.parent;
+            const doc = parentWin.document;
+            function updateClock() {
+                const now = new Date();
+                const clockEl = doc.getElementById('tfl-live-clock');
+                const dateEl  = doc.getElementById('tfl-live-date');
+                const subEl   = doc.getElementById('tfl-live-refresh');
+                if (clockEl) {
+                    clockEl.textContent = new Intl.DateTimeFormat('en-GB', {
+                        timeZone: 'Europe/London', hour: '2-digit', minute: '2-digit', hour12: false
+                    }).format(now);
+                }
+                if (dateEl) {
+                    dateEl.textContent = new Intl.DateTimeFormat('en-GB', {
+                        timeZone: 'Europe/London', weekday: 'long', day: '2-digit', month: 'long', year: 'numeric'
+                    }).format(now);
+                }
+                if (subEl) {
+                    subEl.textContent = 'Live clock · use Refresh Data to reload';
+                }
+            }
+            updateClock();
+            if (!parentWin.__tflClockInterval) {
+                parentWin.__tflClockInterval = parentWin.setInterval(updateClock, 1000);
+            }
+        })();
+        </script>""",
+        height=0,
+        scrolling=False,
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # SIDEBAR
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _scenario_key(prefix: str, field: str) -> str:
+    return f"{prefix}_{field}"
+
+
+def _sync_weather_preset(prefix: str) -> None:
+    """Keep numeric weather inputs aligned with the selected preset label."""
+    weather = st.session_state[_scenario_key(prefix, "weather")]
+    st.session_state[_scenario_key(prefix, "precip")] = float(WEATHER_PRECIP[weather])
+    st.session_state[_scenario_key(prefix, "humidity")] = WEATHER_HUMIDITY[weather]
+
+
+def _ensure_weather_state(prefix: str, default_weather: str) -> None:
+    """Initialize per-scenario weather state once without clobbering user edits."""
+    weather_key = _scenario_key(prefix, "weather")
+    precip_key = _scenario_key(prefix, "precip")
+    humidity_key = _scenario_key(prefix, "humidity")
+
+    if weather_key not in st.session_state:
+        st.session_state[weather_key] = default_weather
+    if precip_key not in st.session_state:
+        st.session_state[precip_key] = float(WEATHER_PRECIP[st.session_state[weather_key]])
+    if humidity_key not in st.session_state:
+        st.session_state[humidity_key] = WEATHER_HUMIDITY[st.session_state[weather_key]]
+
+
+def _ensure_compare_defaults(
+    weather: str,
+    temp_c: float,
+    crowding_index: float,
+) -> None:
+    """Seed Scenario B with a contrasting weather preset on first use."""
+    # Pick the opposite end of the weather spectrum so B is visually distinct
+    # from A by default, making the comparison immediately meaningful.
+    _CONTRAST = {
+        "Clear": "Heavy Rain",
+        "Light Rain": "Wind",
+        "Heavy Rain": "Clear",
+        "Wind": "Clear",
+        "Fog": "Clear",
+    }
+    contrast_weather = _CONTRAST.get(weather, "Heavy Rain")
+    defaults = {
+        _scenario_key("scenario_b", "weather"): contrast_weather,
+        _scenario_key("scenario_b", "temp_c"): max(0, temp_c - 8),
+        _scenario_key("scenario_b", "crowding"): crowding_index,
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+    _ensure_weather_state("scenario_b", st.session_state[_scenario_key("scenario_b", "weather")])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 1 — PREDICTIONS
+# ─────────────────────────────────────────────────────────────────────────────
+
 def _render_sidebar(metrics: Dict, best_name: str) -> Dict:
-    """
-    Build sidebar controls and return all user selections as a dict.
-    I ordered inputs by usage frequency: line → hour → day → weather → advanced.
-    """
+    """Build sidebar controls and return the current scenario selections."""
     st.sidebar.markdown("""
     <div style="text-align:center;padding:.5rem 0 1.1rem;">
       <span style="font-size:1.6rem;">🚇</span><br>
@@ -1046,60 +1608,158 @@ def _render_sidebar(metrics: Dict, best_name: str) -> Dict:
 
     network_mode = st.sidebar.toggle(
         "🌐 Network Overview",
-        value=False, key="network_mode",
-        help="Show all 11 lines simultaneously instead of a single line")
+        value=False,
+        key="network_mode",
+        help="Show all 11 lines simultaneously instead of a single line",
+    )
     st.sidebar.markdown("---")
     st.sidebar.markdown(
         "<span style='font-size:.7rem;font-weight:700;letter-spacing:.08em;"
         "color:#A8C4F0;text-transform:uppercase;'>Scenario</span>",
-        unsafe_allow_html=True)
+        unsafe_allow_html=True,
+    )
 
-    # Line selector (disabled in network mode)
     sel_line = st.sidebar.selectbox(
-        "Tube Line", LINE_NAMES, index=LINE_NAMES.index("Central"),
-        disabled=network_mode, help="Choose the line to predict")
+        "Tube Line",
+        LINE_NAMES,
+        index=LINE_NAMES.index("Central"),
+        disabled=network_mode,
+        help="Choose the line to predict",
+    )
     lc = LINE_COLOURS.get(sel_line, "#003B6F")
     st.sidebar.markdown(
         f'<div style="width:100%;height:3px;background:{lc};'
-        f'border-radius:2px;margin:-6px 0 6px;"></div>', unsafe_allow_html=True)
+        f'border-radius:2px;margin:-6px 0 6px;"></div>',
+        unsafe_allow_html=True,
+    )
 
-    # Hour slider
     hour = st.sidebar.slider("Hour of Day", 0, 23, datetime.now().hour)
     is_peak = any(s <= hour < e for s, e in PEAK_HOURS)
     st.sidebar.caption("🔴 Peak hour" if is_peak else "🟢 Off-peak")
 
-    # Day of week
-    day_names = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
-    day_name = st.sidebar.selectbox(
-        "Day of Week", day_names, index=datetime.now().weekday())
+    day_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    day_name = st.sidebar.selectbox("Day of Week", day_names, index=datetime.now().weekday())
     dow = day_names.index(day_name)
+    crowding_default = _default_crowding(sel_line, hour)
 
-    # Weather
+    _ensure_weather_state("scenario_a", WEATHER_OPTIONS[0])
     weather = st.sidebar.selectbox(
-        "Weather", WEATHER_OPTIONS,
-        format_func=lambda w: f"{WEATHER_ICONS[w]} {w}")
-    temp_c = st.sidebar.slider("Temperature (°C)", -5, 35, 15)
+        "Weather",
+        WEATHER_OPTIONS,
+        index=WEATHER_OPTIONS.index(st.session_state[_scenario_key("scenario_a", "weather")]),
+        key=_scenario_key("scenario_a", "weather"),
+        on_change=_sync_weather_preset,
+        args=("scenario_a",),
+        format_func=lambda w: f"{WEATHER_ICONS[w]} {w}",
+    )
 
-    # Advanced section
+    temp_key = _scenario_key("scenario_a", "temp_c")
+    crowd_key = _scenario_key("scenario_a", "crowding")
+    if temp_key not in st.session_state:
+        st.session_state[temp_key] = 15
+    if crowd_key not in st.session_state:
+        st.session_state[crowd_key] = float(crowding_default)
+
+    temp_c = st.sidebar.slider("Temperature (°C)", -5, 35, key=temp_key)
+    crowding_index = st.sidebar.slider(
+        "Crowding Index",
+        0.0,
+        1.0,
+        step=0.01,
+        key=crowd_key,
+        help="Manual crowding override used in live scenario prediction.",
+    )
+
     with st.sidebar.expander("Advanced Weather"):
-        precip_mm = st.slider("Precipitation (mm)", 0.0, 30.0,
-                               float(WEATHER_PRECIP[weather]), step=0.5,
-                               key="adv_precip")
-        humidity  = st.slider("Humidity (%)", 20, 100,
-                               WEATHER_HUMIDITY[weather], key="adv_humid")
-        wind_kph  = st.slider("Wind Speed (km/h)", 0, 80, 15, key="adv_wind")
+        precip_mm = st.slider(
+            "Precipitation (mm)",
+            0.0,
+            30.0,
+            step=0.5,
+            key=_scenario_key("scenario_a", "precip"),
+        )
+        humidity = st.slider(
+            "Humidity (%)",
+            20,
+            100,
+            key=_scenario_key("scenario_a", "humidity"),
+        )
+
+    st.sidebar.caption(
+        f"Typical peak crowding weight for {sel_line}: "
+        f"{CROWDING_WEIGHTS.get(sel_line, 0.05):.2f}"
+    )
+
+    _ensure_compare_defaults(weather, temp_c, crowding_index)
+    compare_weather = st.session_state[_scenario_key("scenario_b", "weather")]
+    compare_temp_c = float(st.session_state[_scenario_key("scenario_b", "temp_c")])
+    compare_precip_mm = float(st.session_state[_scenario_key("scenario_b", "precip")])
+    compare_humidity = int(st.session_state[_scenario_key("scenario_b", "humidity")])
+    compare_crowding = float(st.session_state[_scenario_key("scenario_b", "crowding")])
+
+    with st.sidebar.expander(
+        "Scenario B",
+        expanded=st.session_state.get("compare_enabled", False),
+    ):
+        compare_enabled = st.toggle(
+            "Enable comparison",
+            value=False,
+            key="compare_enabled",
+            help="Overlay a second what-if scenario on the 24-hour forecast.",
+        )
+        if compare_enabled:
+            compare_weather = st.selectbox(
+                "Scenario B Weather",
+                WEATHER_OPTIONS,
+                index=WEATHER_OPTIONS.index(st.session_state[_scenario_key("scenario_b", "weather")]),
+                key=_scenario_key("scenario_b", "weather"),
+                on_change=_sync_weather_preset,
+                args=("scenario_b",),
+                format_func=lambda w: f"{WEATHER_ICONS[w]} {w}",
+            )
+            compare_temp_c = st.slider(
+                "Scenario B Temperature (°C)",
+                -5,
+                35,
+                key=_scenario_key("scenario_b", "temp_c"),
+            )
+            compare_precip_mm = st.slider(
+                "Scenario B Precipitation (mm)",
+                0.0,
+                30.0,
+                step=0.5,
+                key=_scenario_key("scenario_b", "precip"),
+            )
+            compare_humidity = st.slider(
+                "Scenario B Humidity (%)",
+                20,
+                100,
+                key=_scenario_key("scenario_b", "humidity"),
+            )
+            compare_crowding = st.slider(
+                "Scenario B Crowding",
+                0.0,
+                1.0,
+                step=0.01,
+                key=_scenario_key("scenario_b", "crowding"),
+            )
+        else:
+            compare_enabled = False
+
     st.sidebar.markdown("---")
 
-    if st.sidebar.button("🔄 Refresh Data",
-                          help="Clear all caches and reload from disk"):
+    if st.sidebar.button(
+        "🔄 Refresh Data",
+        key="refresh_data",
+        help="Clear all caches and reload from disk",
+    ):
         st.cache_data.clear()
         st.cache_resource.clear()
         st.rerun()
 
-    # Model info card at bottom
-    m   = metrics.get("best", _FALLBACK_METRICS["best"])
-    mae = m.get("test_mae",  2.41)
-    r2  = m.get("test_r2",  0.749)
+    m = metrics.get("best", _FALLBACK_METRICS["best"])
+    mae = m.get("test_mae", 2.41)
+    r2 = m.get("test_r2", 0.749)
     st.sidebar.markdown(f"""
     <div style="background:rgba(0,177,64,.12);border:1px solid rgba(0,177,64,.35);
                 border-radius:10px;padding:.8rem;font-size:.76rem;margin-top:.4rem;">
@@ -1120,68 +1780,86 @@ def _render_sidebar(metrics: Dict, best_name: str) -> Dict:
         {best_name.upper()} · 40 features · seed 42</div>
     </div>""", unsafe_allow_html=True)
 
-    return dict(line=sel_line, hour=hour, dow=dow,
-                weather=weather, temp_c=temp_c,
-                precip_mm=precip_mm, humidity=humidity,
-                wind_kph=wind_kph, network_mode=network_mode)
+    return dict(
+        line=sel_line,
+        hour=hour,
+        dow=dow,
+        weather=weather,
+        temp_c=temp_c,
+        precip_mm=precip_mm,
+        humidity=humidity,
+        network_mode=network_mode,
+        crowding_index=crowding_index,
+        compare_enabled=compare_enabled,
+        compare_weather=compare_weather,
+        compare_temp_c=compare_temp_c,
+        compare_precip_mm=compare_precip_mm,
+        compare_humidity=compare_humidity,
+        compare_crowding=compare_crowding,
+    )
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# BATCH 24-H SCENARIO PREDICTOR  (creates one predictor instance for all hours)
-# ─────────────────────────────────────────────────────────────────────────────
 
 @st.cache_data(show_spinner=False, ttl=60)
 def _predict_24h_scenario(
-    line: str, dow: int,
-    temp_c: float, precip_mm: float, humidity: int,
-) -> List[Optional[float]]:
-    """
-    Return a 24-element list of severity predictions, one per hour (0–23).
-    Creates a single FutureDelayPredictor instance to avoid repeated disk loads.
-    Cached for 60 s so rapid sidebar tweaks don't re-run the model.
-    Returns None for any hour that fails; callers fall back to test-data average.
-    """
+    artifact_dir: str,
+    line: str,
+    forecast_date_iso: str,
+    temp_c: float,
+    precip_mm: float,
+    humidity: int,
+    crowding_index: Optional[float] = None,
+) -> Dict[str, object]:
+    """Return deterministic hourly predictions for one fixed forecast date."""
     try:
-        from future_prediction import FutureDelayPredictor
-        cfg = get_config()
-        latest_run = get_latest_run_id(cfg.paths.artifacts_dir)
-        if latest_run is None:
-            return [None] * 24
-        art = cfg.paths.artifacts_dir / latest_run
-        predictor = FutureDelayPredictor(
-            str(art / "best_model.pkl"),
-            str(art / "feature_metadata.pkl"),
-        )
-        now = datetime.now()
-        results: List[Optional[float]] = []
+        predictor = _get_future_predictor(artifact_dir)
+        forecast_date = datetime.fromisoformat(forecast_date_iso).date()
+        preds: List[Optional[float]] = []
+        ci_los: List[Optional[float]] = []
+        ci_his: List[Optional[float]] = []
+        failed_hours: List[int] = []
         for h in range(24):
-            try:
-                candidate = now.replace(hour=h, minute=0, second=0, microsecond=0)
-                if dow != now.weekday():
-                    days_ahead = (dow - now.weekday()) % 7 or 7
-                    candidate = (now + timedelta(days=days_ahead)).replace(
-                        hour=h, minute=0, second=0, microsecond=0)
-                elif candidate <= now:
-                    candidate += timedelta(days=1)
-                res = predictor.predict_delay(
-                    line=line, target_datetime=candidate,
-                    weather_forecast={"temperature": temp_c,
-                                      "precipitation": precip_mm,
-                                      "humidity": humidity},
-                )
-                results.append(float(res["predicted_delay_minutes"]))
-            except Exception:
-                results.append(None)
-        return results
-    except Exception:
-        return [None] * 24
+            res = _predict_with_predictor(
+                predictor,
+                line=line,
+                target_datetime=_day_hour_datetime(forecast_date, h),
+                temp_c=temp_c,
+                precip_mm=precip_mm,
+                humidity=humidity,
+                crowding_index=crowding_index,
+            )
+            if res is None:
+                preds.append(None)
+                ci_los.append(None)
+                ci_his.append(None)
+                failed_hours.append(h)
+            else:
+                preds.append(float(res["prediction"]))
+                ci_los.append(float(res["ci_lo"]))
+                ci_his.append(float(res["ci_hi"]))
+        return {
+            "pred": preds,
+            "ci_lo": ci_los,
+            "ci_hi": ci_his,
+            "failed_hours": failed_hours,
+            "forecast_date_iso": forecast_date.isoformat(),
+        }
+    except Exception as exc:
+        logger.warning(
+            "24-hour scenario forecast failed for %s on %s: %s",
+            line,
+            forecast_date_iso,
+            exc,
+        )
+        return {
+            "pred": [None] * 24,
+            "ci_lo": [None] * 24,
+            "ci_hi": [None] * 24,
+            "failed_hours": list(range(24)),
+            "forecast_date_iso": forecast_date_iso,
+        }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TAB 1 — PREDICTIONS
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _tab_predictions(models: Dict, tabular: Dict, sb: Dict, t: Dict) -> None:
+def _tab_predictions(models: Dict, tabular: Dict, sb: Dict, t: Dict, artifact_dir: str) -> None:
     """
     Mode A (single line): hero card · gauge · CI · 24-h sparkline · top-3 SHAP.
     Mode B (network):     all-11 grid · network heatmap · overall KPI.
@@ -1200,6 +1878,7 @@ def _tab_predictions(models: Dict, tabular: Dict, sb: Dict, t: Dict) -> None:
     temp_c    = sb["temp_c"]
     precip_mm = sb["precip_mm"]
     humidity  = sb["humidity"]
+    crowding_index = sb["crowding_index"]
 
     # ══════════════════════════════════════════════════════════
     # MODE B — Network Overview
@@ -1213,7 +1892,16 @@ def _tab_predictions(models: Dict, tabular: Dict, sb: Dict, t: Dict) -> None:
         all_preds: Dict[str, float] = {}
         with st.spinner("Computing all-lines predictions…"):
             for ln in LINE_NAMES:
-                val = _predict_scenario(ln, hour, dow, temp_c, precip_mm, humidity)
+                val = _predict_scenario(
+                    artifact_dir,
+                    ln,
+                    hour,
+                    dow,
+                    temp_c,
+                    precip_mm,
+                    humidity,
+                    crowding_index,
+                )
                 all_preds[ln] = val if val is not None else float(
                     test_preds[test_preds["line"] == ln][model_col].mean()
                     if not test_preds[test_preds["line"] == ln].empty else 0.0)
@@ -1222,7 +1910,7 @@ def _tab_predictions(models: Dict, tabular: Dict, sb: Dict, t: Dict) -> None:
         total_w   = sum(CROWDING_WEIGHTS.values())
         net_delay = (sum(all_preds.get(ln, 0) * CROWDING_WEIGHTS.get(ln, 0.05)
                          for ln in LINE_NAMES) / total_w)
-        net_col, net_lbl = _status(net_delay)
+        net_col, net_lbl = _status_from_severity(net_delay)
         day_abbr = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"][dow]
 
         kc1, kc2 = st.columns([1.5, 1])
@@ -1267,7 +1955,7 @@ def _tab_predictions(models: Dict, tabular: Dict, sb: Dict, t: Dict) -> None:
         for idx, ln in enumerate(sorted_lines):
             delay = all_preds[ln]
             lc    = LINE_COLOURS.get(ln, "#003B6F")
-            sc, sl = _status(delay)
+            sc, sl = _status_from_severity(delay)
             # Test-data hourly average for sparkline
             day_data = [
                 test_preds[(test_preds["line"] == ln) &
@@ -1309,12 +1997,22 @@ def _tab_predictions(models: Dict, tabular: Dict, sb: Dict, t: Dict) -> None:
         return
 
     lc = LINE_COLOURS.get(line, "#003B6F")
+    mae = float(np.abs(line_df["actual"] - line_df[model_col]).mean())
 
     with st.spinner("Computing prediction…"):
-        live_pred = _predict_scenario(line, hour, dow, temp_c, precip_mm, humidity)
+        live_pred = _predict_scenario(
+            artifact_dir,
+            line,
+            hour,
+            dow,
+            temp_c,
+            precip_mm,
+            humidity,
+            crowding_index,
+        )
 
     pred_val = live_pred if live_pred is not None else float(line_df[model_col].mean())
-    sc, sl   = _status(pred_val)
+    sc, sl   = _status_from_severity(pred_val)
 
     # Confidence interval (conformal if available, else residual quantiles)
     cal = feat_md.get("conformal_cal_scores")
@@ -1331,6 +2029,7 @@ def _tab_predictions(models: Dict, tabular: Dict, sb: Dict, t: Dict) -> None:
         else:
             std = 1.5
             ci_lo, ci_hi = max(0.0, pred_val - 1.96 * std), pred_val + 1.96 * std
+    event_note = _event_note(line, hour, dow)
 
     # ── Hero prediction card ──────────────────────────────────────────────────
     text_col = "#FFFFFF" if lc not in ("#FFD300","#95CDBA","#F3A9BB") else "#111111"
@@ -1370,36 +2069,120 @@ def _tab_predictions(models: Dict, tabular: Dict, sb: Dict, t: Dict) -> None:
     with g_col:
         st.plotly_chart(_gauge(pred_val, t), width='stretch',
                         config={"displayModeBar": False}, key="predict_gauge")
+        # Severity scale legend — one-liner so any first-time user knows the units
+        st.markdown(
+            f"<div style='text-align:center;font-size:.75rem;color:{t['muted']};margin-top:-.4rem;'>"
+            "<span style='color:#00B140;font-weight:700;'>0</span> Good Service &nbsp;·&nbsp; "
+            "<span style='color:#FFD300;font-weight:700;'>1</span> Minor Delays &nbsp;·&nbsp; "
+            "<span style='color:#DC241F;font-weight:700;'>2</span> Severe Delays"
+            "</div>",
+            unsafe_allow_html=True,
+        )
 
     with f_col:
         st.markdown("**What's driving this prediction?**")
-        if live_pred is None:
-            st.caption("FutureDelayPredictor unavailable — showing training SHAP values.")
+        st.caption("Bars show how much each factor shifts the predicted severity away from a typical seasonal baseline.")
 
-        feat_imp = tabular.get("feature_importance")
-        if feat_imp is not None:
-            top_real = feat_imp.sort_values("importance", ascending=False).head(3)
-            PLAIN = {"hour": "Time of day",
-                     "rolling_mean_delay_3": "Recent delay history",
-                     "rolling_mean_delay_12": "12-hour rolling mean",
-                     "rolling_std_delay_12": "Delay variability",
-                     "lag_delay_1": "Last-hour delay",
-                     "lag_delay_3": "3-hour lag delay",
-                     "recent_disruption_rate": "Disruption rate",
-                     "crowding_index": "Crowding level",
-                     "precipitation_mm": "Rainfall",
-                     "temp_c": "Temperature",
-                     "temp_delta_1h": "Temp change (1h)",
-                     "network_avg_delay": "Network avg delay",
-                     "peak_time": "Peak hours",
-                     "day_of_week": "Day of week",
-                     "crowding_x_peak": "Crowding × Peak"}
-            top3_data = [
-                (PLAIN.get(r["feature"], r["feature"].replace("_"," ").title()),
-                 float(r["importance"]),
-                 ["#0098D4","#00782A","#E86B00"][i])
-                for i, (_, r) in enumerate(top_real.iterrows())]
-        else:
+        # Compute counterfactual contributions so bars reflect the current scenario.
+        # 1. Baseline = seasonal typical weather, model-estimated crowding (pure temporal signal).
+        # 2. Delta-weather = baseline vs current weather (isolates weather contribution).
+        # 3. Delta-crowding = baseline vs current crowding (isolates crowding contribution).
+        _SEASONAL_WEATHER: Dict[int, Dict] = {
+            1: {"temp_c": 7.0,  "precip_mm": 2.2, "humidity": 80},
+            2: {"temp_c": 7.0,  "precip_mm": 1.6, "humidity": 77},
+            3: {"temp_c": 9.0,  "precip_mm": 1.7, "humidity": 72},
+            4: {"temp_c": 11.0, "precip_mm": 1.8, "humidity": 68},
+            5: {"temp_c": 15.0, "precip_mm": 2.0, "humidity": 66},
+            6: {"temp_c": 18.0, "precip_mm": 1.8, "humidity": 65},
+            7: {"temp_c": 20.0, "precip_mm": 1.8, "humidity": 64},
+            8: {"temp_c": 20.0, "precip_mm": 2.0, "humidity": 66},
+            9: {"temp_c": 17.0, "precip_mm": 2.0, "humidity": 70},
+            10: {"temp_c": 14.0, "precip_mm": 2.7, "humidity": 75},
+            11: {"temp_c": 10.0, "precip_mm": 2.4, "humidity": 80},
+            12: {"temp_c": 7.0,  "precip_mm": 2.2, "humidity": 82},
+        }
+        target_dt = _resolve_point_datetime(hour, dow)
+        seas = _SEASONAL_WEATHER[target_dt.month]
+        _pred_obj = _get_future_predictor(artifact_dir)
+        top3_data: List[Tuple[str, float, str]] = []
+        if _pred_obj is not None and live_pred is not None:
+            # Zero-crowding + seasonal weather = pure temporal signal.
+            # Using crowding=0.0 (not None) ensures _estimate_crowding() never
+            # runs, so the baseline is always the same reference point.
+            _r_base = _predict_with_predictor(
+                _pred_obj, line, target_dt,
+                seas["temp_c"], seas["precip_mm"], int(seas["humidity"]),
+                crowding_index=0.0,
+            )
+            # Weather contribution: user weather vs seasonal weather, both at zero crowding.
+            _r_weather = _predict_with_predictor(
+                _pred_obj, line, target_dt,
+                temp_c, precip_mm, humidity,
+                crowding_index=0.0,
+            )
+            # Crowding contribution: user crowding vs zero crowding, seasonal weather.
+            _r_crowd = _predict_with_predictor(
+                _pred_obj, line, target_dt,
+                seas["temp_c"], seas["precip_mm"], int(seas["humidity"]),
+                crowding_index=crowding_index,
+            )
+            if _r_base is not None:
+                _base_val      = float(_r_base["prediction"])
+                _weather_delta = abs(float(_r_weather["prediction"]) - _base_val) if _r_weather else 0.0
+                _crowd_delta   = abs(float(_r_crowd["prediction"])  - _base_val) if _r_crowd  else 0.0
+                top3_data = [
+                    ("Time of day & history", _base_val,     "#0098D4"),
+                    ("Weather conditions",    _weather_delta, "#E86B00"),
+                    ("Crowding level",        _crowd_delta,   "#00782A"),
+                ]
+                # Flag when both contributions are near zero after proper isolation.
+                if _weather_delta < 0.01 and _crowd_delta < 0.01:
+                    st.caption(
+                        "Weather and crowding are contributing very little — "
+                        "the prediction is dominated by time-of-day and recent "
+                        "delay history. Try Heavy Rain or a high Crowding Index "
+                        "to see their impact."
+                    )
+
+        if not top3_data:
+            # Fallback: extract real importances from the loaded model.
+            best_model = models.get("best_model")
+            if best_model is not None:
+                try:
+                    final_est = best_model.steps[-1][1]
+                    fi_arr = final_est.feature_importances_
+                    fn_arr = best_model[:-1].get_feature_names_out()
+                    _PLAIN = {
+                        "num__hour": "Time of day", "num__hour_sin": "Time of day",
+                        "num__hour_cos": "Time of day", "num__peak_time": "Time of day",
+                        "num__day_of_week": "Day of week",
+                        "num__rolling_mean_delay_3": "Recent delay history",
+                        "num__rolling_mean_delay_12": "Recent delay history",
+                        "num__rolling_std_delay_12": "Recent delay history",
+                        "num__lag_delay_1": "Recent delay history",
+                        "num__lag_delay_3": "Recent delay history",
+                        "num__recent_disruption_rate": "Recent delay history",
+                        "num__temp_c": "Weather conditions",
+                        "num__precipitation_mm": "Weather conditions",
+                        "num__humidity": "Weather conditions",
+                        "num__temp_delta_1h": "Weather conditions",
+                        "num__precipitation_x_temp": "Weather conditions",
+                        "num__crowding_index": "Crowding level",
+                        "num__crowding_x_peak": "Crowding level",
+                        "num__network_avg_delay": "Network conditions",
+                        "num__network_delay_volatility": "Network conditions",
+                    }
+                    group_imp: Dict[str, float] = {}
+                    for fname, fimp in zip(fn_arr, fi_arr):
+                        group = _PLAIN.get(fname, fname.replace("num__","").replace("_"," ").title())
+                        group_imp[group] = group_imp.get(group, 0.0) + float(fimp)
+                    top3_sorted = sorted(group_imp.items(), key=lambda x: -x[1])[:3]
+                    _cols = ["#0098D4", "#E86B00", "#00782A"]
+                    top3_data = [(n, v, _cols[i]) for i, (n, v) in enumerate(top3_sorted)]
+                except Exception:
+                    pass
+
+        if not top3_data:
             top3_data = [
                 ("Time of day",        0.40, "#0098D4"),
                 ("Recent delay",       0.35, "#00782A"),
@@ -1408,13 +2191,16 @@ def _tab_predictions(models: Dict, tabular: Dict, sb: Dict, t: Dict) -> None:
 
         max_v = max(v for _, v, _ in top3_data) or 1.0
         for name, val, col in top3_data:
-            pct = val / max_v * 100
+            pct     = val / max_v * 100
+            # Show the value as a "+X.XX sev" delta for the first bar (baseline)
+            # and as "±X.XX sev" for the weather/crowding contribution bars.
+            val_label = f"{val:.2f} sev"
             st.markdown(f"""
             <div style="margin-bottom:.5rem;">
               <div style="display:flex;justify-content:space-between;margin-bottom:.18rem;">
                 <span style="font-size:.82rem;font-weight:600;
                              color:{t['font']};">{name}</span>
-                <span style="font-size:.75rem;color:{t['muted']};">{val:.3f}</span>
+                <span style="font-size:.75rem;color:{t['muted']};">{val_label}</span>
               </div>
               <div style="background:{t['grid']};border-radius:4px;height:7px;">
                 <div style="background:{col};width:{pct:.0f}%;height:7px;
@@ -1422,27 +2208,71 @@ def _tab_predictions(models: Dict, tabular: Dict, sb: Dict, t: Dict) -> None:
               </div>
             </div>""", unsafe_allow_html=True)
 
-    st.markdown("---")
 
     # ── 24-hour day forecast sparkline ───────────────────────────────────────
     st.markdown(f"### 24-Hour Forecast — {line} Line")
+    forecast_date = _resolve_scenario_date(dow)
+    forecast_date_iso = forecast_date.isoformat()
     with st.spinner("Computing scenario forecast…"):
-        live_24h = _predict_24h_scenario(line, dow, temp_c, precip_mm, humidity)
+        live_24h = _predict_24h_scenario(
+            artifact_dir, line, forecast_date_iso,
+            temp_c, precip_mm, humidity, crowding_index,
+        )
 
-    used_live = sum(1 for v in live_24h if v is not None)
+    used_live = sum(1 for v in live_24h["pred"] if v is not None)
     day_data: List[float] = []
-    for h, live_val in enumerate(live_24h):
+    ci_lo_data: List[float] = []
+    ci_hi_data: List[float] = []
+    for h, live_val in enumerate(live_24h["pred"]):
         if live_val is not None:
-            day_data.append(live_val)
+            day_data.append(float(live_val))
+            ci_lo_data.append(float(live_24h["ci_lo"][h]))
+            ci_hi_data.append(float(live_24h["ci_hi"][h]))
         else:
             fb = test_preds[
                 (test_preds["line"] == line) &
                 (test_preds["timestamp"].dt.hour == h) &
                 (test_preds["timestamp"].dt.dayofweek == dow)
             ][model_col].mean()
-            day_data.append(float(fb) if pd.notna(fb) else 0.0)
+            fb_val = float(fb) if pd.notna(fb) else 0.0
+            day_data.append(fb_val)
+            ci_lo_data.append(max(0.0, fb_val - mae))
+            ci_hi_data.append(fb_val + mae)
 
-    spark = _sparkline(list(range(24)), day_data, line, t, height=170)
+    compare_day_data: Optional[List[float]] = None
+    compare_lo: Optional[List[float]] = None
+    compare_hi: Optional[List[float]] = None
+    if sb["compare_enabled"]:
+        with st.spinner("Computing Scenario B forecast…"):
+            live_24h_b = _predict_24h_scenario(
+                artifact_dir, line, forecast_date_iso,
+                sb["compare_temp_c"], sb["compare_precip_mm"],
+                sb["compare_humidity"], sb["compare_crowding"],
+            )
+        compare_day_data = []
+        compare_lo = []
+        compare_hi = []
+        for h, live_val in enumerate(live_24h_b["pred"]):
+            if live_val is not None:
+                compare_day_data.append(float(live_val))
+                compare_lo.append(float(live_24h_b["ci_lo"][h]))
+                compare_hi.append(float(live_24h_b["ci_hi"][h]))
+            else:
+                fb = test_preds[
+                    (test_preds["line"] == line) &
+                    (test_preds["timestamp"].dt.hour == h) &
+                    (test_preds["timestamp"].dt.dayofweek == dow)
+                ][model_col].mean()
+                fb_val = float(fb) if pd.notna(fb) else 0.0
+                compare_day_data.append(fb_val)
+                compare_lo.append(max(0.0, fb_val - mae))
+                compare_hi.append(fb_val + mae)
+
+    spark = _scenario_forecast_chart(
+        list(range(24)), day_data, ci_lo_data, ci_hi_data, line, t,
+        values_b=compare_day_data, ci_lo_b=compare_lo, ci_hi_b=compare_hi,
+        label_a="Scenario A", label_b="Scenario B",
+    )
     spark.update_layout(
         yaxis_title="Predicted Severity (0–2)",
         xaxis=dict(
@@ -1463,6 +2293,50 @@ def _tab_predictions(models: Dict, tabular: Dict, sb: Dict, t: Dict) -> None:
             "Peak hours shaded.")
     else:
         st.caption("Test-set averages for the selected day (live predictor unavailable). Peak hours shaded.")
+
+    if sb["compare_enabled"] and compare_day_data is not None:
+        ca, cb = st.columns(2)
+        with ca:
+            st.metric(
+                "Scenario A Peak Severity",
+                f"{max(day_data):.2f} sev",
+                delta=f"≈ {_fmt_min(max(day_data) * SEV_TO_MIN)}",
+            )
+        with cb:
+            st.metric(
+                "Scenario B Peak Severity",
+                f"{max(compare_day_data):.2f} sev",
+                delta=f"≈ {_fmt_min(max(compare_day_data) * SEV_TO_MIN)}",
+            )
+    st.caption(
+        f"Scenario inputs: {WEATHER_ICONS.get(sb['weather'], '')} {sb['weather']} "
+        f"· {temp_c}°C · {precip_mm} mm · crowding {crowding_index:.2f}."
+    )
+    if sb["compare_enabled"] and compare_day_data is not None:
+        st.caption(
+            f"Scenario B: {WEATHER_ICONS.get(sb['compare_weather'], '')} {sb['compare_weather']} "
+            f"· {sb['compare_temp_c']}°C · {sb['compare_precip_mm']} mm "
+            f"· crowding {sb['compare_crowding']:.2f}."
+        )
+
+    export_df = pd.DataFrame({
+        "hour": list(range(24)),
+        "scenario_a_pred_sev": day_data,
+        "scenario_a_ci_lo_sev": ci_lo_data,
+        "scenario_a_ci_hi_sev": ci_hi_data,
+        "scenario_a_minutes_est": [v * SEV_TO_MIN for v in day_data],
+    })
+    if compare_day_data is not None and compare_lo is not None and compare_hi is not None:
+        export_df["scenario_b_pred_sev"] = compare_day_data
+        export_df["scenario_b_ci_lo_sev"] = compare_lo
+        export_df["scenario_b_ci_hi_sev"] = compare_hi
+        export_df["scenario_b_minutes_est"] = [v * SEV_TO_MIN for v in compare_day_data]
+    st.download_button(
+        label="Download 24-hour forecast CSV",
+        data=export_df.to_csv(index=False).encode(),
+        file_name=f"{line.lower().replace(' & ', '_').replace(' ', '_')}_24h_forecast.csv",
+        mime="text/csv",
+    )
 
     st.markdown("---")
 
@@ -1491,6 +2365,142 @@ def _tab_predictions(models: Dict, tabular: Dict, sb: Dict, t: Dict) -> None:
                           f"{p.std():.3f} sev",  f"{p.min():.3f} sev",
                           f"{p.max():.3f} sev"],
             }))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EVALUATION CHART BUILDERS (walk-forward · drift · ablation)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _walk_forward_chart(wf: Dict, t: Dict) -> go.Figure:
+    """Grouped bar chart of per-fold MAE + improvement % for walk-forward backtest."""
+    folds    = wf["folds"]
+    summary  = wf["summary"]
+    labels   = [f"Fold {r['fold']}" for r in folds]
+    lgbm_mae = [r["mae"]       for r in folds]
+    naive_mae = [r["naive_mae"] for r in folds]
+    imps     = [r["improvement_pct"] for r in folds]
+
+    fig = make_subplots(
+        rows=1, cols=2,
+        subplot_titles=("MAE per Fold vs Naive", "Improvement over Naive (%)"),
+        horizontal_spacing=0.12,
+    )
+
+    fig.add_trace(go.Bar(
+        name="LightGBM", x=labels, y=lgbm_mae,
+        marker_color="#003B6F", offsetgroup="A",
+        hovertemplate="<b>%{x}</b><br>LightGBM MAE: %{y:.4f}<extra></extra>",
+    ), row=1, col=1)
+    fig.add_trace(go.Bar(
+        name="Naive", x=labels, y=naive_mae,
+        marker_color="#DC241F", opacity=0.75, offsetgroup="B",
+        hovertemplate="<b>%{x}</b><br>Naive MAE: %{y:.4f}<extra></extra>",
+    ), row=1, col=1)
+
+    imp_colours = ["#00B140" if v >= 0 else "#DC241F" for v in imps]
+    fig.add_trace(go.Bar(
+        name="Improvement %", x=labels, y=imps,
+        marker_color=imp_colours, showlegend=False,
+        hovertemplate="<b>%{x}</b><br>%{y:+.1f}% vs Naive<extra></extra>",
+        text=[f"{v:+.1f}%" for v in imps],
+        textposition="outside",
+        textfont=dict(color=t["font"], size=11),
+    ), row=1, col=2)
+    fig.add_hline(y=0, line_width=1, line_color=t["grid"], row=1, col=2)
+
+    title = (
+        f"Walk-Forward Backtesting — {summary['n_folds']} folds  "
+        f"|  Mean MAE: {summary['mae_mean']:.4f} ± {summary['mae_std']:.4f}  "
+        f"|  Mean R²: {summary['r2_mean']:.4f}  "
+        f"|  Mean improvement: {summary['improvement_pct_mean']:+.1f}%"
+    )
+    fig = _fig_base(fig, t, title, height=400)
+    fig.update_layout(barmode="group", bargap=0.25, bargroupgap=0.08)
+    return fig
+
+
+def _drift_chart(drift: Dict, t: Dict) -> go.Figure:
+    """Line chart of per-window MAE with trend line for drift analysis."""
+    windows = drift["windows"]
+    trend   = drift["trend"]
+    labels  = [w["window"] for w in windows]
+    mae_b   = [w["mae_best"]  for w in windows]
+    mae_n   = [w["mae_naive"] for w in windows]
+    x       = list(range(len(labels)))
+
+    z        = np.polyfit(x, mae_b, 1)
+    trend_y  = [float(np.poly1d(z)(xi)) for xi in x]
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=labels, y=mae_b, mode="lines+markers", name="LightGBM MAE",
+        line=dict(color="#003B6F", width=2.5),
+        marker=dict(size=7),
+        hovertemplate="<b>%{x}</b><br>MAE: %{y:.4f}<extra></extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=labels, y=mae_n, mode="lines+markers", name="Naive MAE",
+        line=dict(color="#DC241F", width=1.8, dash="dash"),
+        marker=dict(size=5), opacity=0.75,
+        hovertemplate="<b>%{x}</b><br>Naive MAE: %{y:.4f}<extra></extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=labels, y=trend_y, mode="lines",
+        name=f"Trend (slope={z[0]:+.4f})",
+        line=dict(color=t["muted"], width=1.5, dash="dot"),
+        hoverinfo="skip",
+    ))
+
+    drift_tag = "DRIFT DETECTED" if trend["drift_detected"] else "No drift"
+    title = (
+        f"Model MAE Over Time  |  "
+        f"Spearman ρ={trend['spearman_rho']:.3f}  p={trend['p_value']:.4f}  "
+        f"|  {drift_tag}"
+    )
+    fig = _fig_base(fig, t, title, height=360)
+    fig.update_layout(
+        xaxis_title=f"Time window ({trend['window_type']})",
+        yaxis_title="MAE (severity units)",
+        xaxis=dict(tickangle=-30),
+    )
+    return fig
+
+
+def _ablation_plotly_chart(ablation: Dict, t: Dict) -> go.Figure:
+    """Horizontal bar chart of MAE delta per feature group from ablation study."""
+    records  = ablation["records"]
+    full_mae = ablation["full_mae"]
+    df_abl   = pd.DataFrame(records).sort_values("delta", ascending=True)
+
+    bar_colours = ["#DC241F" if d > 0 else "#0098D4" for d in df_abl["delta"]]
+    fig = go.Figure(go.Bar(
+        x=df_abl["delta"],
+        y=df_abl["group"],
+        orientation="h",
+        marker_color=bar_colours,
+        text=[f"{'+'if d>=0 else ''}{d:.3f}" for d in df_abl["delta"]],
+        textposition="outside",
+        textfont=dict(color=t["font"], size=11),
+        customdata=list(zip(df_abl["mae"], df_abl["pct_change"], df_abl["n_removed"])),
+        hovertemplate=(
+            "<b>Remove %{y}</b><br>"
+            "MAE delta: %{x:+.4f}<br>"
+            "Ablated MAE: %{customdata[0]:.4f}<br>"
+            "% change: %{customdata[1]:+.1f}%<br>"
+            "Features removed: %{customdata[2]}<extra></extra>"
+        ),
+    ))
+    fig.add_vline(x=0, line_width=1.5, line_color=t["muted"])
+    fig = _fig_base(
+        fig, t,
+        f"Ablation Study — Feature Group Contribution  |  Full model MAE: {full_mae:.4f}",
+        height=350,
+    )
+    fig.update_layout(
+        xaxis_title="MAE delta vs full model (red = group helped; blue = group hurt)",
+        yaxis_title="",
+    )
+    return fig
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1556,6 +2566,16 @@ def _tab_performance(tabular: Dict, t: Dict) -> None:
                             width='stretch', key="perf_scatter_actual_pred")
 
     st.markdown("---")
+    st.markdown("### Feature Correlation Matrix")
+    if test_preds is not None:
+        corr_fig = _feature_correlation_chart(test_preds, feat_imp, t)
+        if corr_fig is not None:
+            st.plotly_chart(corr_fig, width='stretch', key="perf_feature_correlation")
+            st.caption("Pearson correlations across the most relevant numeric columns available in the evaluation set.")
+        else:
+            st.info("Not enough numeric feature columns were available to build a correlation matrix.")
+
+    st.markdown("---")
     st.markdown("### Classification Accuracy")
     st.caption(
         "Predictions rounded to nearest integer (0 = Good Service, "
@@ -1589,6 +2609,129 @@ def _tab_performance(tabular: Dict, t: Dict) -> None:
                 df_p.style.background_gradient(
                     subset=["MAE (sev)"], cmap="RdYlGn_r"),
                 width='stretch', hide_index=True)
+
+    # ── Load outputs from analysis/ scripts ───────────────────────────────────
+    analysis = _load_analysis_outputs(str(ROOT / "analysis" / "outputs"))
+
+    # ── Walk-forward backtesting ──────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("### Walk-Forward Backtesting")
+    st.caption(
+        "The model is retrained from scratch on all data *before* each evaluation window "
+        "and tested on the next unseen window — proving generalisation across multiple future "
+        "periods rather than just the final 20%."
+    )
+    if "walk_forward" in analysis:
+        wf = analysis["walk_forward"]
+        summary = wf["summary"]
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Mean MAE", f"{summary['mae_mean']:.4f}",
+                  delta=f"±{summary['mae_std']:.4f} std")
+        c2.metric("MAE Range",
+                  f"{summary['mae_min']:.4f} – {summary['mae_max']:.4f}")
+        c3.metric("Mean R²", f"{summary['r2_mean']:.4f}")
+        c4.metric("Mean improvement vs Naive",
+                  f"{summary['improvement_pct_mean']:+.1f}%",
+                  delta_color="inverse" if summary["improvement_pct_mean"] < 0 else "normal")
+        st.plotly_chart(
+            _walk_forward_chart(wf, t),
+            width='stretch', key="perf_walk_forward",
+        )
+        with st.expander("Per-fold detail", expanded=False):
+            fold_rows = [
+                {
+                    "Fold":        r["fold"],
+                    "Test window": f"{r['test_start'][:10]} → {r['test_end'][:10]}",
+                    "Train rows":  r["train_rows"],
+                    "Test rows":   r["test_rows"],
+                    "MAE":         r["mae"],
+                    "RMSE":        r["rmse"],
+                    "R²":          r["r2"],
+                    "vs Naive":    f"{r['improvement_pct']:+.1f}%",
+                }
+                for r in wf["folds"]
+            ]
+            st.dataframe(pd.DataFrame(fold_rows), hide_index=True, width='stretch')
+    else:
+        st.info(
+            "No walk-forward backtest results found. "
+            "Generate them with: `python analysis/walk_forward_backtest.py`"
+        )
+
+    # ── Drift analysis ────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("### Drift Analysis")
+    st.caption(
+        "MAE is grouped into time windows over the held-out test set. "
+        "A rising trend indicates distributional drift away from the training distribution."
+    )
+    if "drift" in analysis:
+        drift = analysis["drift"]
+        trend = drift["trend"]
+        verdict_colour = "#DC241F" if trend["drift_detected"] else "#00B140"
+        verdict_label  = "Drift detected" if trend["drift_detected"] else "No drift"
+        st.markdown(
+            f'<div style="border-left:4px solid {verdict_colour};'
+            f'padding:0.5rem 0.9rem;border-radius:6px;margin-bottom:0.8rem;">'
+            f'<strong style="color:{verdict_colour};">{verdict_label}</strong> — '
+            f'{trend["interpretation"]}'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        d1, d2, d3 = st.columns(3)
+        d1.metric("Spearman ρ", f"{trend['spearman_rho']:+.4f}")
+        d2.metric("p-value", f"{trend['p_value']:.4f}")
+        d3.metric("Relative MAE increase",
+                  f"{trend['relative_increase']*100:+.1f}%")
+        st.plotly_chart(
+            _drift_chart(drift, t),
+            width='stretch', key="perf_drift",
+        )
+    else:
+        st.info(
+            "No drift analysis results found. "
+            "Generate them with: `python analysis/drift_analysis.py`"
+        )
+
+    # ── Ablation study ────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("### Ablation Study — Feature Group Contributions")
+    st.caption(
+        "Each feature group is removed in turn and the model is retrained. "
+        "A positive MAE delta means that group was helpful; negative means removing it "
+        "slightly improved performance (redundant or noisy features)."
+    )
+    if "ablation" in analysis:
+        abl = analysis["ablation"]
+        a1, a2, a3 = st.columns(3)
+        a1.metric("Full model MAE", f"{abl['full_mae']:.4f}")
+        a2.metric("Naive baseline MAE", f"{abl['naive_mae']:.4f}")
+        gain = (1 - abl["full_mae"] / abl["naive_mae"]) * 100
+        a3.metric("Full model improvement", f"{gain:.1f}%", delta_color="inverse")
+        st.plotly_chart(
+            _ablation_plotly_chart(abl, t),
+            width='stretch', key="perf_ablation",
+        )
+        with st.expander("Ablation detail table", expanded=False):
+            abl_rows = [
+                {
+                    "Feature group":   r["group"],
+                    "MAE w/o group":   r["mae"],
+                    "Delta vs full":   f"{'+'if r['delta']>=0 else''}{r['delta']:.4f}",
+                    "% change":        f"{'+'if r['pct_change']>=0 else''}{r['pct_change']:.1f}%",
+                    "Features removed": r["n_removed"],
+                }
+                for r in sorted(abl["records"], key=lambda x: x["delta"], reverse=True)
+            ]
+            st.dataframe(pd.DataFrame(abl_rows), hide_index=True, width='stretch')
+    elif "ablation_png" in analysis:
+        st.image(analysis["ablation_png"],
+                 caption="Ablation study — MAE delta per feature group (run analysis/ablation_study.py to generate interactive chart)")
+    else:
+        st.info(
+            "No ablation results found. "
+            "Generate them with: `python analysis/ablation_study.py`"
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1913,7 +3056,269 @@ def _tab_data_collection(t: Dict) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TAB 6 — ABOUT
+# TAB 6 — RISK MAP
+# ─────────────────────────────────────────────────────────────────────────────
+
+_RISK_THRESHOLDS: Dict[str, float] = {"Low": 0.5, "Medium": 1.2}
+_RISK_COLOURS:    Dict[str, str]   = {
+    "Low":    "#00782A",
+    "Medium": "#E86B00",
+    "High":   "#D41515",
+}
+_RISK_BG: Dict[str, str] = {
+    "Low":    "#e8f5e9",
+    "Medium": "#fff3e0",
+    "High":   "#fdecea",
+}
+
+
+def _schematic_risk_map(risk_lookup: Dict[str, str], t: Dict) -> go.Figure:
+    """
+    Draw the London Underground schematic (Beck-style) with each line segment
+    coloured by its risk band (Low=green / Medium=amber / High=red).
+
+    Coordinates come from app/map_data.LINE_PATHS (x 0-100, y 0-70 grid).
+    The map is drawn as a Plotly Scatter figure — no external mapping library needed.
+    """
+    fig = go.Figure()
+
+    # ── Line traces ──────────────────────────────────────────────────────────
+    for line_name, path in LINE_PATHS.items():
+        risk   = risk_lookup.get(line_name, "Low")
+        colour = _RISK_COLOURS[risk]
+        xs     = [p[0] for p in path]
+        ys     = [p[1] for p in path]
+        fig.add_trace(go.Scatter(
+            x=xs, y=ys,
+            mode="lines",
+            line=dict(color=colour, width=4),
+            name=line_name,
+            hovertemplate=f"<b>{line_name}</b><br>Risk: {risk}<extra></extra>",
+            showlegend=False,
+        ))
+
+    # ── Interchange station dots ─────────────────────────────────────────────
+    sx = [s[0] for s in INTERCHANGE_STATIONS]
+    sy = [s[1] for s in INTERCHANGE_STATIONS]
+    sl = [s[2] for s in INTERCHANGE_STATIONS]
+    dot_colour = "#FFFFFF" if t["dark"] else "#333333"
+    fig.add_trace(go.Scatter(
+        x=sx, y=sy,
+        mode="markers+text",
+        marker=dict(size=7, color=dot_colour,
+                    line=dict(color=t["paper"], width=1.5)),
+        text=sl,
+        textposition="top center",
+        textfont=dict(size=8, color=t["muted"]),
+        hoverinfo="text",
+        hovertext=sl,
+        showlegend=False,
+        name="",
+    ))
+
+    # ── Risk-level legend entries ────────────────────────────────────────────
+    for level, col in _RISK_COLOURS.items():
+        fig.add_trace(go.Scatter(
+            x=[None], y=[None],
+            mode="lines",
+            line=dict(color=col, width=4),
+            name=f"{level} Risk",
+            showlegend=True,
+        ))
+
+    fig.update_layout(
+        paper_bgcolor=t["paper"],
+        plot_bgcolor=t["plot"],
+        font=dict(color=t["font"],
+                  family="'Inter','Segoe UI',sans-serif"),
+        xaxis=dict(visible=False, range=[-2, 104]),
+        yaxis=dict(visible=False, range=[-2, 73], scaleanchor="x", scaleratio=1),
+        margin=dict(l=8, r=8, t=36, b=8),
+        height=520,
+        legend=dict(
+            orientation="h", x=0.02, y=1.04,
+            bgcolor="rgba(0,0,0,0.12)" if t["dark"] else "rgba(255,255,255,0.85)",
+            bordercolor=t["grid"], borderwidth=1,
+            font=dict(size=11, color=t["font"]),
+        ),
+        title=dict(
+            text="Network Risk — colour shows predicted delay risk per line",
+            font=dict(size=13, color=t["font"]), x=0.01,
+        ),
+    )
+    return fig
+
+
+def _risk_level(severity: float) -> str:
+    """Map a predicted severity value (0–2 scale) to a risk band label."""
+    if severity < _RISK_THRESHOLDS["Low"]:
+        return "Low"
+    if severity < _RISK_THRESHOLDS["Medium"]:
+        return "Medium"
+    return "High"
+
+
+def _tab_risk(tabular: Dict, t: Dict) -> None:
+    """
+    Per-line risk visualisation derived from the held-out test set.
+
+    Risk bands (severity 0–2 scale):
+      Low    — median predicted severity < 0.5  (Good Service expected)
+      Medium — 0.5 – 1.2  (Minor Delays expected)
+      High   — ≥ 1.2  (Severe Delays expected)
+
+    Shows a KPI summary row, a colour-coded horizontal bar chart, and
+    per-line detail cards with median/P95 severity and test-set MAE.
+    """
+    test_preds = tabular.get("test_predictions")
+    if test_preds is None or test_preds.empty:
+        st.warning(
+            "No prediction data available. "
+            "Run `python train.py` then `python explain.py` first."
+        )
+        return
+
+    st.markdown("### Network Risk Map")
+    st.caption(
+        "Risk level per line is derived from the **median predicted severity** "
+        "on the held-out 20 % test set (strict chronological split). "
+        "Severity is the real TfL label — 0 = Good Service · 1 = Minor Delays · 2 = Severe Delays. "
+        "Thresholds: **Low** < 0.5 · **Medium** 0.5–1.2 · **High** ≥ 1.2."
+    )
+
+    # ── Per-line statistics ───────────────────────────────────────────────────
+    records = []
+    for line, grp in test_preds.groupby("line"):
+        median_pred = float(grp["pred_best"].median())
+        p95_pred    = float(grp["pred_best"].quantile(0.95))
+        mae         = float((grp["actual"] - grp["pred_best"]).abs().mean())
+        records.append({
+            "line":        line,
+            "median_pred": median_pred,
+            "p95_pred":    p95_pred,
+            "mae":         mae,
+            "risk":        _risk_level(median_pred),
+        })
+
+    risk_df = (
+        pd.DataFrame(records)
+        .sort_values("median_pred", ascending=False)
+        .reset_index(drop=True)
+    )
+
+    # ── KPI summary row ───────────────────────────────────────────────────────
+    counts = risk_df["risk"].value_counts()
+    k1, k2, k3 = st.columns(3)
+    bg  = t["card_bg"]
+    bdr = t["card_border"]
+    txt = t["font"]
+    sub = t["muted"]
+
+    for col, level in zip([k1, k2, k3], ["High", "Medium", "Low"]):
+        n      = int(counts.get(level, 0))
+        colour = _RISK_COLOURS[level]
+        col.markdown(f"""
+        <div style="background:{bg}; border:1px solid {bdr}; border-left:5px solid {colour};
+                    border-radius:10px; padding:0.9rem 1.1rem; font-family:'Inter',sans-serif;">
+            <div style="font-size:0.72rem; color:{sub}; text-transform:uppercase;
+                        letter-spacing:.06em;">{level} Risk Lines</div>
+            <div style="font-size:2rem; font-weight:800; color:{colour};">{n}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── Horizontal bar chart ─────────────────────────────────────────────────
+    bar_colours = [_RISK_COLOURS[r] for r in risk_df["risk"]]
+    fig = go.Figure(go.Bar(
+        x=risk_df["median_pred"],
+        y=risk_df["line"],
+        orientation="h",
+        marker_color=bar_colours,
+        text=[f"{v:.2f}" for v in risk_df["median_pred"]],
+        textposition="outside",
+        hovertemplate=(
+            "<b>%{y}</b><br>"
+            "Median predicted severity: %{x:.2f}<br>"
+            "95th percentile: %{customdata[0]:.2f}<br>"
+            "Test MAE: %{customdata[1]:.3f}<extra></extra>"
+        ),
+        customdata=risk_df[["p95_pred", "mae"]].values,
+    ))
+    fig.add_vline(
+        x=_RISK_THRESHOLDS["Low"], line_dash="dot", line_color="#00782A",
+        annotation_text="Low / Medium", annotation_position="top right",
+    )
+    fig.add_vline(
+        x=_RISK_THRESHOLDS["Medium"], line_dash="dot", line_color="#D41515",
+        annotation_text="Medium / High", annotation_position="top right",
+    )
+    fig = _fig_base(fig, t, "Median Predicted Severity by Line (test set)", height=440)
+    fig.update_layout(
+        xaxis_title="Median Predicted Severity (0 = Good · 1 = Minor · 2 = Severe)",
+        yaxis_title="",
+        margin=dict(l=20, r=90, t=50, b=20),
+    )
+    st.plotly_chart(fig, width='stretch', key="risk_bar_chart")
+
+    # ── Schematic tube map coloured by risk ───────────────────────────────────
+    st.markdown("---")
+    st.markdown("#### Network Schematic — Risk Heatmap")
+    risk_lookup = dict(zip(risk_df["line"], risk_df["risk"]))
+    st.plotly_chart(
+        _schematic_risk_map(risk_lookup, t),
+        width='stretch',
+        config={"displayModeBar": False},
+        key="risk_schematic_map",
+    )
+    st.caption(
+        "Each line is coloured by its risk band: "
+        "🟢 Low (median sev < 0.5) · 🟠 Medium (0.5–1.2) · 🔴 High (≥ 1.2). "
+        "Station dots mark key interchanges."
+    )
+    st.markdown("---")
+
+    # ── Per-line risk cards ───────────────────────────────────────────────────
+    st.markdown("#### Line-by-Line Risk Detail")
+    cols_per_row = 3
+    rows = [
+        risk_df.iloc[i : i + cols_per_row]
+        for i in range(0, len(risk_df), cols_per_row)
+    ]
+    for row_slice in rows:
+        cols = st.columns(cols_per_row)
+        for col, (_, r) in zip(cols, row_slice.iterrows()):
+            colour  = _RISK_COLOURS[r["risk"]]
+            card_bg = _RISK_BG[r["risk"]] if not t["dark"] else t["card_bg"]
+            lc      = LINE_COLOURS.get(r["line"], "#003B6F")
+            col.markdown(f"""
+            <div style="background:{card_bg}; border:1px solid {colour};
+                        border-left:5px solid {lc};
+                        border-radius:12px; padding:0.85rem 1rem;
+                        font-family:'Inter',sans-serif; margin-bottom:0.5rem;">
+                <div style="font-weight:700; font-size:0.9rem; color:{txt};">{r['line']}</div>
+                <div style="display:flex; justify-content:space-between; margin-top:0.4rem;">
+                    <span style="font-size:1.4rem; font-weight:800; color:{colour};">{r['risk']}</span>
+                    <span style="font-size:0.8rem; color:{sub}; align-self:flex-end;">
+                        med {r['median_pred']:.2f} sev
+                    </span>
+                </div>
+                <div style="font-size:0.75rem; color:{sub}; margin-top:0.3rem;">
+                    p95 {r['p95_pred']:.2f} &nbsp;·&nbsp; MAE {r['mae']:.3f}
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.caption(
+        "Risk is computed from the best model's predictions on the held-out 20 % "
+        "test set (chronological split). This is a retrospective measure for "
+        "evaluation purposes, not a real-time operational alert."
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 7 — ABOUT
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _tab_about(tabular: Dict, t: Dict) -> None:
@@ -2070,6 +3475,8 @@ def _tab_about(tabular: Dict, t: Dict) -> None:
     with about_tabs[3]:
         st.markdown("### Model Card")
         r_mae = metrics.get("ridge", _FALLBACK_METRICS["ridge"]).get("test_mae", 2.80)
+        test_mae_ci = best_m.get("test_mae_ci")
+        test_rmse_ci = best_m.get("test_rmse_ci")
         st.markdown(f"""
 | Property | Value |
 |---|---|
@@ -2094,6 +3501,25 @@ def _tab_about(tabular: Dict, t: Dict) -> None:
 
 **Note:** `delay_minutes` is a synthetic proxy not used as the model target.
 The TfL Unified API reports status categories, not minute values per line.
+        """)
+        st.markdown(f"""
+**Additional evaluation detail**
+- Test MAE 95% CI: {f"{test_mae_ci[0]:.3f}-{test_mae_ci[1]:.3f} sev" if test_mae_ci else "Unavailable"}
+- Test RMSE 95% CI: {f"{test_rmse_ci[0]:.3f}-{test_rmse_ci[1]:.3f} sev" if test_rmse_ci else "Unavailable"}
+- CV fold-level MAE: not persisted in the current artifact
+
+**Feature groups**
+- Temporal: 12
+- Weather: 5
+- Historical / lag / rolling: 6
+- Network / crowding: 6
+- Event / seasonal: 3
+- Line / topology / service pattern: 8
+
+**Limitations**
+- `delay_minutes` is synthetic and only used for UI interpretation.
+- Predictions are line-level, not station-level.
+- Signal faults, engineering works, staffing issues, and unplanned incidents are only partially observed.
         """)
 
     # ── Ethics ────────────────────────────────────────────────────────────────
@@ -2120,7 +3546,7 @@ is required before acting on any prediction in an operational context.
 
 **Data Provenance**
 16 days of real TfL + OpenWeatherMap data, April 2026. `delay_minutes` is the
-actual TfL-measured operational delay, not a synthetic proxy.
+synthetic proxy used for interpretation only; the model target is `delay_severity`.
         """)
 
 
@@ -2171,6 +3597,7 @@ def main() -> None:
     t = _theme()
 
     _render_header()
+    _enable_live_clock()   # clock only — no auto-reload
     _render_live_status_strip(t)
 
     metrics   = tabular.get("metrics", _FALLBACK_METRICS)
@@ -2183,12 +3610,13 @@ def main() -> None:
         "🚇 Line Comparison",
         "📈 Historical Trends",
         "💾 Data Collection",
+        "⚠️ Risk Map",
         "ℹ️ About",
     ]
     tabs = st.tabs(tab_labels)
 
     with tabs[0]:
-        _tab_predictions(models, tabular, sb, t)
+        _tab_predictions(models, tabular, sb, t, artifact_dir)
 
     with tabs[1]:
         _tab_performance(tabular, t)
@@ -2203,6 +3631,9 @@ def main() -> None:
         _tab_data_collection(t)
 
     with tabs[5]:
+        _tab_risk(tabular, t)
+
+    with tabs[6]:
         _tab_about(tabular, t)
 
     st.markdown(f"""
