@@ -128,7 +128,10 @@ def create_shap_explainer(model, X_background, config):
                     size=config.explainability.shap_background_size,
                     replace=False
                 )
-                X_background_transformed = X_background_transformed[indices]
+                if hasattr(X_background_transformed, 'iloc'):
+                    X_background_transformed = X_background_transformed.iloc[indices]
+                else:
+                    X_background_transformed = X_background_transformed[indices]
 
             explainer = shap.Explainer(regressor, X_background_transformed)
         else:

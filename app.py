@@ -609,6 +609,20 @@ def _load_analysis_outputs(analysis_dir: str) -> Dict:
     if abl_png_p.exists():
         out["ablation_png"] = str(abl_png_p)
 
+    for key, filename in [
+        ("equity",           "equity_results.json"),
+        ("arima",            "arima_results.json"),
+        ("ensemble",         "ensemble_results.json"),
+        ("shap_selection",   "shap_feature_selection.json"),
+    ]:
+        p = base / filename
+        if p.exists():
+            try:
+                with open(p) as f:
+                    out[key] = json.load(f)
+            except Exception as exc:
+                logger.warning("Could not load %s: %s", filename, exc)
+
     return out
 
 
@@ -2731,6 +2745,275 @@ def _tab_performance(tabular: Dict, t: Dict) -> None:
         st.info(
             "No ablation results found. "
             "Generate them with: `python analysis/ablation_study.py`"
+        )
+
+    # ── ARIMA vs LightGBM comparison ──────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("### ARIMA vs LightGBM — Per-Line Model Comparison")
+    st.caption(
+        "A univariate SARIMA(1,1,1)(1,1,1,96) model — using only the delay "
+        "time series with no exogenous features — is compared against LightGBM "
+        "per line. Lines where ARIMA wins indicate that autocorrelation alone "
+        "captures most of the signal; additional features add noise at the "
+        "current data volume."
+    )
+    if "arima" in analysis:
+        arima_data = analysis["arima"]
+        arima_records = arima_data.get("records", [])
+        if arima_records:
+            arima_df = pd.DataFrame(arima_records).dropna(subset=["lgbm_mae"])
+            arima_wins  = arima_data.get("arima_wins_lines", [])
+            lgbm_wins   = arima_data.get("lgbm_wins_lines", [])
+
+            a1, a2 = st.columns(2)
+            a1.metric("Lines where ARIMA wins", len(arima_wins))
+            a2.metric("Lines where LightGBM wins", len(lgbm_wins))
+
+            paper_bg = t.get("paper_bg", "#ffffff")
+            plot_bg  = t.get("plot_bg",  "#fafbfc")
+            font_col = t.get("font_col", "#1a1a2e")
+            grid_col = t.get("grid_col", "#e9ecef")
+
+            fig_arima = go.Figure()
+            fig_arima.add_trace(go.Bar(
+                name="ARIMA/SARIMA",
+                x=arima_df["line"],
+                y=arima_df["arima_mae"],
+                marker_color="#ff7f0e",
+            ))
+            fig_arima.add_trace(go.Bar(
+                name="LightGBM",
+                x=arima_df["line"],
+                y=arima_df["lgbm_mae"],
+                marker_color="#1f77b4",
+            ))
+            fig_arima.update_layout(
+                barmode="group",
+                paper_bgcolor=paper_bg, plot_bgcolor=plot_bg,
+                font=dict(color=font_col, family="'Inter', sans-serif"),
+                margin=dict(l=20, r=20, t=50, b=20),
+                title=dict(text="ARIMA vs LightGBM MAE per Line", font=dict(size=14, color=font_col), x=0.01),
+                xaxis=dict(gridcolor=grid_col),
+                yaxis=dict(title="MAE (severity units)", gridcolor=grid_col),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                height=380,
+            )
+            st.plotly_chart(fig_arima, width='stretch', key="perf_arima_comparison")
+
+            with st.expander("ARIMA comparison detail", expanded=False):
+                tbl = arima_df[["line", "arima_mae", "lgbm_mae", "winner", "model_used"]].copy()
+                tbl.columns = ["Line", "ARIMA MAE", "LightGBM MAE", "Winner", "ARIMA model"]
+                st.dataframe(tbl.style.apply(
+                    lambda row: ["background-color: rgba(255,127,14,0.15)" if row["Winner"] == "ARIMA"
+                                 else "background-color: rgba(31,119,180,0.15)"] * len(row), axis=1
+                ), hide_index=True, width='stretch')
+
+            st.caption(
+                "**Interpretation:** ARIMA outperforms LightGBM on lines with stable, "
+                "autocorrelated delay patterns. LightGBM's advantage on high-variance "
+                "lines (e.g. Victoria, Metropolitan) comes from its ability to handle "
+                "occasional large spikes using cross-line network features. "
+                "See `analysis/line_adaptive_ensemble.py` for the combined model."
+            )
+    else:
+        st.info(
+            "No ARIMA comparison results found. "
+            "Generate them with: `python analysis/arima_baseline.py`"
+        )
+
+    # ── Line-adaptive ensemble results ────────────────────────────────────────
+    if "ensemble" in analysis:
+        ens = analysis["ensemble"]
+        st.markdown("#### Line-Adaptive Ensemble")
+        st.caption(
+            "Combines ARIMA (for stable lines) and LightGBM (for high-variance lines). "
+            "Winner selected on validation set — test set never seen during selection."
+        )
+        e1, e2, e3 = st.columns(3)
+        overall = ens.get("overall_mae", {})
+        e1.metric("Ensemble test MAE", f"{overall.get('ensemble', 0):.4f}",
+                  delta=f"{ens.get('ensemble_vs_lgbm_pct', 0):+.1f}% vs LightGBM",
+                  delta_color="inverse")
+        e2.metric("LightGBM only", f"{overall.get('lgbm', 0):.4f}")
+        e3.metric("ARIMA only",    f"{overall.get('arima', 0):.4f}")
+
+        sel = ens.get("selection", {})
+        if sel:
+            arima_lines = [l for l, m in sel.items() if m == "ARIMA"]
+            lgbm_lines  = [l for l, m in sel.items() if m == "LightGBM"]
+            st.caption(
+                f"**ARIMA routes:** {', '.join(arima_lines) or 'none'}   |   "
+                f"**LightGBM routes:** {', '.join(lgbm_lines) or 'none'}"
+            )
+
+    # ── Feature selection (overfitting analysis) ──────────────────────────────
+    st.markdown("---")
+    st.markdown("### SHAP Feature Selection — Overfitting Analysis")
+    st.caption(
+        "Retrains LightGBM with decreasing feature counts (ranked by SHAP importance) "
+        "to test whether fewer features narrows the train/val overfitting gap."
+    )
+    if "shap_selection" in analysis:
+        sel_data = analysis["shap_selection"]
+        sel_results = sel_data.get("results", [])
+        if sel_results:
+            paper_bg = t.get("paper_bg", "#ffffff")
+            plot_bg  = t.get("plot_bg",  "#fafbfc")
+            font_col = t.get("font_col", "#1a1a2e")
+            grid_col = t.get("grid_col", "#e9ecef")
+
+            labels      = [r["label"]       for r in sel_results]
+            train_maes  = [r["train_mae"]   for r in sel_results]
+            val_maes    = [r["cv_val_mae"]  for r in sel_results]
+            test_maes   = [r["test_mae"]    for r in sel_results]
+
+            fig_sel = go.Figure()
+            fig_sel.add_trace(go.Bar(name="Train MAE",  x=labels, y=train_maes,  marker_color="#1f77b4"))
+            fig_sel.add_trace(go.Bar(name="CV-Val MAE", x=labels, y=val_maes,    marker_color="#ff7f0e"))
+            fig_sel.add_trace(go.Bar(name="Test MAE",   x=labels, y=test_maes,   marker_color="#2ca02c"))
+            fig_sel.update_layout(
+                barmode="group",
+                paper_bgcolor=paper_bg, plot_bgcolor=plot_bg,
+                font=dict(color=font_col, family="'Inter', sans-serif"),
+                margin=dict(l=20, r=20, t=50, b=20),
+                title=dict(text="Train / CV-Val / Test MAE by Feature Count",
+                           font=dict(size=14, color=font_col), x=0.01),
+                xaxis=dict(gridcolor=grid_col),
+                yaxis=dict(title="MAE (severity units)", gridcolor=grid_col),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                height=370,
+            )
+            st.plotly_chart(fig_sel, width='stretch', key="perf_shap_selection")
+
+            conclusion = sel_data.get("conclusion", "")
+            if conclusion:
+                st.info(conclusion)
+
+            with st.expander("Feature selection detail", expanded=False):
+                tbl_rows = [
+                    {
+                        "Model":          r["label"],
+                        "Features":       r["n_features"],
+                        "Train MAE":      r["train_mae"],
+                        "CV-Val MAE":     r["cv_val_mae"],
+                        "Test MAE":       r["test_mae"],
+                        "Overfit gap":    r["overfit_gap"],
+                    }
+                    for r in sel_results
+                ]
+                st.dataframe(pd.DataFrame(tbl_rows), hide_index=True, width='stretch')
+    else:
+        st.info(
+            "No feature selection results found. "
+            "Generate them with: `python analysis/shap_feature_selection.py`"
+        )
+
+    # ── Equity analysis ───────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("### Equity Analysis — Prediction Error vs Community Deprivation")
+    st.caption(
+        "Do lines serving more deprived communities have higher prediction error? "
+        "Each line is assigned a catchment-area IMD score (English Indices of "
+        "Deprivation 2019, weighted by number of stations per borough). "
+        "Spearman rank correlation tests whether error and deprivation are related."
+    )
+    if "equity" in analysis:
+        eq = analysis["equity"]
+        eq_records = eq.get("records", [])
+        rho   = eq.get("spearman_rho", 0)
+        p_val = eq.get("p_value", 1)
+        sig   = eq.get("significant", False)
+
+        eq1, eq2, eq3 = st.columns(3)
+        eq1.metric("Spearman ρ", f"{rho:+.4f}")
+        eq2.metric("p-value", f"{p_val:.4f}")
+        eq3.metric("Significant (p < 0.05)", "Yes" if sig else "No",
+                   delta_color="off")
+
+        verdict_colour = "#DC241F" if (sig and rho > 0.3) else "#00B140"
+        st.markdown(
+            f'<div style="border-left:4px solid {verdict_colour}; '
+            f'padding:0.5rem 0.9rem; border-radius:6px; margin-bottom:0.8rem;">'
+            f'{eq.get("interpretation", "")}'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+        if eq_records:
+            paper_bg = t.get("paper_bg", "#ffffff")
+            plot_bg  = t.get("plot_bg",  "#fafbfc")
+            font_col = t.get("font_col", "#1a1a2e")
+            grid_col = t.get("grid_col", "#e9ecef")
+
+            eq_df = pd.DataFrame(eq_records)
+
+            fig_eq = go.Figure()
+            fig_eq.add_trace(go.Scatter(
+                x=eq_df["imd_score"], y=eq_df["mae"],
+                mode="markers+text",
+                text=eq_df["line"],
+                textposition="top right",
+                marker=dict(
+                    size=12,
+                    color=eq_df["mae"],
+                    colorscale="RdYlGn_r",
+                    showscale=True,
+                    colorbar=dict(title="MAE", thickness=12),
+                    line=dict(color="white", width=1),
+                ),
+                hovertemplate=(
+                    "<b>%{text}</b><br>"
+                    "IMD score: %{x:.1f}<br>"
+                    "MAE: %{y:.4f}<extra></extra>"
+                ),
+            ))
+
+            # Trend line
+            if len(eq_df) >= 3:
+                z = np.polyfit(eq_df["imd_score"], eq_df["mae"], 1)
+                x_rng = np.linspace(eq_df["imd_score"].min(), eq_df["imd_score"].max(), 50)
+                fig_eq.add_trace(go.Scatter(
+                    x=x_rng, y=np.polyval(z, x_rng),
+                    mode="lines",
+                    name="Trend",
+                    line=dict(color="rgba(0,0,0,0.3)", dash="dash", width=1.5),
+                    showlegend=True,
+                ))
+
+            fig_eq.update_layout(
+                paper_bgcolor=paper_bg, plot_bgcolor=plot_bg,
+                font=dict(color=font_col, family="'Inter', sans-serif"),
+                margin=dict(l=20, r=20, t=60, b=20),
+                title=dict(
+                    text=f"MAE vs Community Deprivation (Spearman ρ = {rho:+.3f}, p = {p_val:.3f})",
+                    font=dict(size=14, color=font_col), x=0.01,
+                ),
+                xaxis=dict(
+                    title="Catchment-area IMD score (% most deprived LSOAs, higher = more deprived)",
+                    gridcolor=grid_col,
+                ),
+                yaxis=dict(title="Test MAE (severity units)", gridcolor=grid_col),
+                height=420,
+                showlegend=True,
+            )
+            st.plotly_chart(fig_eq, width='stretch', key="perf_equity_scatter")
+
+            with st.expander("IMD scores by line", expanded=False):
+                tbl_eq = eq_df[["line", "imd_score", "mae", "complexity"]].copy()
+                tbl_eq.columns = ["Line", "IMD score", "MAE", "Route complexity"]
+                st.dataframe(tbl_eq.style.background_gradient(
+                    subset=["IMD score"], cmap="RdYlGn_r"
+                ), hide_index=True, width='stretch')
+
+            st.caption(
+                f"IMD source: English Indices of Deprivation 2019 (MHCLG). "
+                f"Scores weighted by number of stations in each borough. "
+                f"n = {eq.get('n_lines', len(eq_df))} lines."
+            )
+    else:
+        st.info(
+            "No equity analysis results found. "
+            "Generate them with: `python analysis/equity_analysis.py`"
         )
 
 

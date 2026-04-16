@@ -209,6 +209,33 @@ def run() -> None:
     else:
         print("\n*All lines used SARIMA(1,1,1)(1,1,1,96) successfully.*")
 
+    # ── Save JSON results ─────────────────────────────────────────────────────
+    import json as _json
+
+    arima_wins = results[results["improvement"] > 0]["line"].tolist()   # improvement > 0 → LGBM worse
+    lgbm_wins  = results[results["improvement"] <= 0]["line"].tolist()
+
+    json_out = {
+        "run_id":          run_id,
+        "arima_wins_lines": arima_wins,
+        "lgbm_wins_lines":  lgbm_wins,
+        "records": [
+            {
+                "line":        row["line"],
+                "arima_mae":   round(row["arima_mae"], 4),
+                "lgbm_mae":    round(row["lgbm_mae"], 4) if not np.isnan(row["lgbm_mae"]) else None,
+                "winner":      "ARIMA" if row["improvement"] > 0 else "LightGBM",
+                "improvement": round(float(row["improvement"]), 4),
+                "model_used":  row["model_used"],
+            }
+            for _, row in results.iterrows()
+        ],
+    }
+    json_path = output_dir / "arima_results.json"
+    with open(json_path, "w") as _jf:
+        _json.dump(json_out, _jf, indent=2)
+    logger.info("Saved ARIMA comparison results to %s", json_path)
+
     # --- Grouped bar chart ---
     valid = results.dropna(subset=["lgbm_mae"])
     x     = np.arange(len(valid))
