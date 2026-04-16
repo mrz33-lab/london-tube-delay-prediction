@@ -46,7 +46,7 @@ class FutureDelayPredictor:
             logger.error(f"Failed to load feature metadata: {exc}")
             raise
 
-        self.uk_holidays = holidays.UK()
+        self.uk_holidays = holidays.country_holidays('GB')
         self._config = get_config()
         logger.info("FutureDelayPredictor ready")
 

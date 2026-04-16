@@ -6,7 +6,7 @@ features. Uses shift() throughout to avoid data leakage.
 """
 
 import logging
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
@@ -376,7 +376,7 @@ def save_feature_metadata(
         FutureDelayPredictor._get_confidence_interval() to build
         distribution-free split-conformal prediction intervals.
     """
-    metadata = {
+    metadata: Dict[str, Any] = {
         'numeric_features': numeric_features,
         'categorical_features': categorical_features,
         'all_features': numeric_features + categorical_features,

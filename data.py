@@ -137,7 +137,7 @@ def generate_synthetic_data(config: Config) -> pd.DataFrame:
     )
 
     end_date = start_date + timedelta(days=config.data.synthetic_n_days)
-    uk_holidays = holidays.UK(years=list(range(start_date.year, end_date.year + 1)))
+    uk_holidays = holidays.country_holidays('GB', years=list(range(start_date.year, end_date.year + 1)))
 
     records = []
 

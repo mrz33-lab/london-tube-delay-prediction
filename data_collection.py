@@ -484,7 +484,7 @@ class DataCollector:
     def __init__(self, tfl_client: TfLClient, weather_client: WeatherClient) -> None:
         self._tfl = tfl_client
         self._weather = weather_client
-        self._uk_holidays = holidays.UK()
+        self._uk_holidays = holidays.country_holidays('GB')
 
     def collect_snapshot(self) -> List[Dict]:
         snapshot_time = datetime.now().replace(second=0, microsecond=0)
