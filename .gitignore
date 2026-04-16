@@ -35,6 +35,9 @@ artifacts/*.db
 *.log
 artifacts/*/run.log
 
+# ── Analysis outputs (regeneratable artefacts) ───────────────────────────────
+analysis/outputs/
+
 # ── Real data (may be large or sensitive) ─────────────────────────────────────
 data/tfl_merged.csv
 data/real/
