@@ -46,3 +46,5 @@ httpx>=0.24.0
 black>=23.12.1
 flake8>=7.0.0
 mypy>=1.8.0
+types-requests>=2.31.0
+types-PyYAML>=6.0.0
