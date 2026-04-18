@@ -24,7 +24,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import holidays
 import requests
@@ -372,7 +372,7 @@ class WeatherClient:
     def fetch_london_weather(self) -> Optional[Dict[str, float]]:
         self._rate_limiter.wait_if_needed()
 
-        params = {
+        params: Dict[str, Union[str, float]] = {
             "lat": LONDON_LAT,
             "lon": LONDON_LON,
             "appid": self._api_key,
