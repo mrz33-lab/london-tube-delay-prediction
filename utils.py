@@ -6,7 +6,7 @@ Covers four areas:
   2. Artifact I/O   — saving/loading configs, metrics, and run IDs
   3. Data helpers   — datetime validation, data-leakage checks, safe arithmetic
   4. Evaluation     — a single evaluate_model() used by every trainer so metrics
-                      are always computed the same way (Objective 3 & 4)
+                      are always computed the same way
 """
 
 import logging
@@ -20,6 +20,7 @@ import numpy as np
 from dataclasses import asdict
 
 from config import Config, RANDOM_SEED
+from features import _TEMPORAL_FEATURE_PREFIXES
 
 
 # ---------------------------------------------------------------------------
@@ -97,8 +98,8 @@ def save_config(config: Config, output_path: Path):
     """Serialise the full project config to a YAML file for reproducibility.
 
     Saving the config alongside every training artefact means that any run can
-    be reproduced exactly by reloading its config — important for the
-    dissertation's experimental methodology (Objective 3).
+    be reproduced exactly by reloading its config — important for
+    experimental reproducibility.
 
     Path objects are converted to plain strings before serialisation because
     the standard YAML library cannot dump pathlib.Path instances.
@@ -200,7 +201,7 @@ def set_random_seeds(seed: int = RANDOM_SEED):
     Called at the start of every training run so that model training,
     train/test splits, and any stochastic operations produce the same result
     each time — a requirement for a scientifically valid comparison between
-    models (Objective 3 and 4).
+    models.
 
     Covers Python's built-in random, NumPy, and PyTorch (if installed).
 
@@ -211,15 +212,6 @@ def set_random_seeds(seed: int = RANDOM_SEED):
     random.seed(seed)
     np.random.seed(seed)
 
-    # PyTorch is optional — only present if the user has installed it.
-    try:
-        import torch  # type: ignore[import-untyped]
-        torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            # Seed all GPU devices, not just the primary one.
-            torch.cuda.manual_seed_all(seed)
-    except ImportError:
-        pass
 
 
 def get_latest_run_id(artifacts_dir: Path) -> Optional[str]:
@@ -261,8 +253,8 @@ def validate_datetime_column(df: pd.DataFrame, column: str = 'timestamp') -> pd.
       - Timezone-aware datetimes are stripped of their timezone info so that
         all timestamps in the dataset use the same naive UTC-equivalent format.
 
-    This is called during data loading (Objective 2) to guard against silent
-    issues where string comparisons replace proper time arithmetic.
+    This is called during data loading to guard against silent issues where
+    string comparisons replace proper time arithmetic.
 
     Args:
         df:      The DataFrame to validate.
@@ -276,6 +268,8 @@ def validate_datetime_column(df: pd.DataFrame, column: str = 'timestamp') -> pd.
     """
     if column not in df.columns:
         raise ValueError(f"Column '{column}' not found in DataFrame")
+
+    df = df.copy()
 
     if not pd.api.types.is_datetime64_any_dtype(df[column]):
         try:
@@ -296,7 +290,7 @@ def check_data_leakage(df, feature_col, time_col='timestamp', group_col=None):
     Data leakage occurs when a feature used for training was computed using
     information that would not have been available at prediction time — a
     common problem with lag and rolling features when the dataset is not
-    sorted correctly before feature engineering (Objective 4).
+    sorted correctly before feature engineering.
 
     The check is simple: after sorting by time, a lag/rolling feature should
     *not* have a valid (non-NaN) value in the very first row, because there is
@@ -326,25 +320,6 @@ def check_data_leakage(df, feature_col, time_col='timestamp', group_col=None):
         return _check_temporal_order(df, feature_col, time_col)
 
     return True
-
-
-# Features that are computed via shift() or rolling() naturally produce NaN
-# in the first row(s) of each group — that is expected and correct behaviour.
-# We use startswith() matching against this explicit list rather than a
-# substring search (e.g. 'lag' in name) to avoid false positives:
-#   - 'flag_route' contains 'lag' but is NOT a temporal lag feature.
-#   - 'catalogue_id' contains 'lag' but is NOT a temporal lag feature.
-_TEMPORAL_FEATURE_PREFIXES: tuple = (
-    'lag_',                      # e.g. lag_delay_1h — delay from N hours ago
-    'rolling_',                  # e.g. rolling_mean_delay_3h — window averages
-    'recent_disruption_rate',    # fraction of recent windows with disruptions
-    'temp_delta_1h',             # change in temperature vs. 1 hour prior
-    'precipitation_delta_1h',    # change in rainfall vs. 1 hour prior
-    'network_avg_delay',         # average delay across all lines at that time
-    'network_delay_volatility',  # standard deviation of delays across lines
-    'lines_disrupted_ratio',     # proportion of lines currently disrupted
-    'is_network_wide_disruption',# binary flag: majority of lines disrupted
-)
 
 
 def _check_temporal_order(df, feature_col, time_col):
@@ -419,29 +394,6 @@ def format_duration(seconds):
         return f"{hours}h {mins}m"
 
 
-def safe_divide(numerator, denominator, default=0.0):
-    """Divide two numbers, returning a safe default instead of raising on zero.
-
-    Prevents ZeroDivisionError and NaN propagation in metric calculations
-    (e.g. when computing per-line delay rates for a line that had zero
-    records in a time window).
-
-    Args:
-        numerator:    The top value of the division.
-        denominator:  The bottom value; if zero or NaN, default is returned.
-        default:      Value to return when division is unsafe (default 0.0).
-
-    Returns:
-        numerator / denominator, or default if the denominator is zero/NaN.
-    """
-    try:
-        if denominator == 0 or pd.isna(denominator):
-            return default
-        return numerator / denominator
-    except Exception:
-        return default
-
-
 # ---------------------------------------------------------------------------
 # 4. Evaluation
 # ---------------------------------------------------------------------------
@@ -479,8 +431,8 @@ def evaluate_model(
 
     Centralising metric computation here (rather than duplicating it in each
     trainer) guarantees that LightGBM, XGBoost, and any future model are
-    always evaluated identically — a prerequisite for a fair comparison in
-    the dissertation (Objective 3 and 4).
+    always evaluated identically — a prerequisite for a fair comparison
+    between models.
 
     Metrics computed:
         MAE   — Mean Absolute Error (minutes); easy to interpret as average

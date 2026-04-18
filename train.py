@@ -14,11 +14,11 @@ import numpy as np
 from sklearn.pipeline import Pipeline
 from sklearn.linear_model import Ridge
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import RandomizedSearchCV, TimeSeriesSplit, cross_val_score
+from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, TimeSeriesSplit, cross_val_score
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 import joblib
 import optuna
-from scipy.stats import wilcoxon as _wilcoxon_test
+from scipy.stats import wilcoxon
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -110,6 +110,11 @@ def _compare_models_statistically(
       violating that assumption.  The Wilcoxon signed-rank test is
       distribution-free and remains valid under heavy-tailed residuals.
 
+    Note: a two-sided test is used because the rank-wise direction of improvement
+    is not guaranteed — the naive model may dominate rank-wise on the many
+    low-delay rows even when its mean error is much higher, making a one-sided
+    alternative unreliable.
+
     Results are saved to statistical_tests.json for dissertation reporting.
     """
     predictions = {name: model.predict(X_test) for name, model in models.items()}
@@ -128,18 +133,18 @@ def _compare_models_statistically(
         if m1 not in abs_errors or m2 not in abs_errors:
             continue
         try:
-            # one-sided: does m1 have significantly greater error than m2?
-            stat, p_val = _wilcoxon_test(
-                abs_errors[m1], abs_errors[m2], alternative='greater'
+            # two-sided: is there a significant rank-wise error difference between m1 and m2?
+            stat, p_val = wilcoxon(
+                abs_errors[m1], abs_errors[m2], alternative='two-sided'
             )
             results[f'{m1}_vs_{m2}'] = {
                 'statistic': round(float(stat), 4),
                 'p_value': round(float(p_val), 6),
                 'significant_at_0.05': bool(p_val < 0.05),
                 'conclusion': (
-                    f'{m2} significantly outperforms {m1} (p={p_val:.4f})'
+                    f'significant rank-wise error difference between {m1} and {m2} (p={p_val:.4f})'
                     if p_val < 0.05
-                    else f'no significant difference between {m1} and {m2} (p={p_val:.4f})'
+                    else f'no significant rank-wise error difference between {m1} and {m2} (p={p_val:.4f})'
                 ),
             }
             logger.info(
@@ -157,8 +162,11 @@ def _compare_models_statistically(
 
 
 class NaiveBaselineModel:
-    """Predicts the last observed delay for each line.
-    Anything that can't beat this is useless.
+    """Last-value constant baseline: replays the final training delay per line for every test row.
+
+    This is a weak baseline — beating it is easy. It is NOT a true persistence
+    (y[t-1]) model. Use it only to establish a floor; beating it does not
+    evidence model skill on its own.
     """
 
     def __init__(self):
@@ -218,15 +226,13 @@ def train_ridge_baseline(X_train, y_train, X_test, y_test,
 
     tscv = TimeSeriesSplit(n_splits=config.models.cv_splits)
 
-    search = RandomizedSearchCV(
+    search = GridSearchCV(
         pipeline,
-        param_distributions=param_grid,
-        n_iter=min(config.models.n_iter_search, len(param_grid['regressor__alpha'])),
+        param_grid=param_grid,
         cv=tscv,
         scoring=config.models.scoring,
-        random_state=RANDOM_SEED,
         n_jobs=-1,
-        verbose=1
+        verbose=1,
     )
 
     search.fit(X_train, y_train)
@@ -471,7 +477,7 @@ def create_diagnostic_plots(y_test, y_pred, model_name, output_dir):
 
 def bootstrap_confidence_interval(y_true, y_pred, metric_func,
                                   n_bootstrap=1000, confidence=0.95,
-                                  block_size=None):
+                                  block_size=None, rng=None):
     """Block bootstrap CI for time-series data.
 
     Standard i.i.d. bootstrap underestimates uncertainty when residuals are
@@ -480,12 +486,17 @@ def bootstrap_confidence_interval(y_true, y_pred, metric_func,
 
     block_size: number of consecutive observations per block.
                 None → auto: int(sqrt(n)).
+    rng: np.random.RandomState to use. Pass a shared instance across multiple
+         calls so each call draws from a different part of the sequence — calling
+         with rng=None creates a fresh seeded RNG each time, producing identical
+         block indices across calls.
     """
     n = len(y_true)
     if block_size is None:
         block_size = max(1, int(np.sqrt(n)))
 
-    rng = np.random.RandomState(RANDOM_SEED)
+    if rng is None:
+        rng = np.random.RandomState(RANDOM_SEED)
     bootstrap_metrics = []
 
     for _ in range(n_bootstrap):
@@ -558,12 +569,6 @@ def main():
 
         numeric_features, categorical_features, all_features = get_feature_columns(train_df, config)
 
-        # placeholder — gets overwritten with real quantiles after training
-        save_feature_metadata(
-            numeric_features, categorical_features, artifact_dir,
-            residual_quantiles={},
-        )
-
         X_train, y_train = prepare_features_for_model(
             train_df, all_features, config.features.target_column
         )
@@ -628,11 +633,14 @@ def main():
         logger.info("STEP 4: Model Comparison")
         logger.info("=" * 80)
 
+        _display_names = {
+            'lightgbm': 'LightGBM', 'xgboost': 'XGBoost', 'randomforest': 'RandomForest',
+        }
         _model_order = [
             ('naive',    'Naive'),
             ('ridge',    'Ridge'),
             ('xgboost',  'XGBoost'),
-            ('best',     best_model_name.title()),
+            ('best',     _display_names.get(best_model_name, best_model_name)),
         ]
         _rows = [(key, label) for key, label in _model_order if key in all_metrics]
         comparison_df = pd.DataFrame({
@@ -656,6 +664,15 @@ def main():
         # used by FutureDelayPredictor for proper 95% CIs
         logger.info("\n--- Computing Per-Line Residual Quantiles ---")
         y_pred_best = models['best'].predict(X_test)
+
+        per_line_test_mae: Dict[str, float] = {}
+        for _line in X_test['line'].unique():
+            _mask = X_test['line'] == _line
+            per_line_test_mae[str(_line)] = float(
+                mean_absolute_error(np.array(y_test)[_mask], y_pred_best[_mask])
+            )
+        all_metrics['best']['per_line_test_mae'] = per_line_test_mae
+
         residuals_all = np.array(y_test) - y_pred_best
         residual_quantiles = {
             '__global__': {
@@ -696,16 +713,18 @@ def main():
         # At inference time, FutureDelayPredictor uses the empirical quantile of
         # these scores to build a PI with a guaranteed marginal coverage rate of
         # ≥ 1-α under exchangeability — no distributional assumptions required.
-        n_cal = len(y_test) // 2
+        n_cal = int(len(y_test) * config.models.conformal_cal_ratio)
         y_pred_cal_half = models['best'].predict(X_test.iloc[:n_cal])
         conformal_cal_scores = np.abs(
             np.array(y_test.iloc[:n_cal]) - y_pred_cal_half
         )
+        conformal_q95 = float(np.percentile(conformal_cal_scores, 95))
+        all_metrics['best']['conformal_q95'] = conformal_q95
         logger.info(
             "Conformal calibration (n=%d): median=%.3f  q95=%.3f",
             n_cal,
             float(np.median(conformal_cal_scores)),
-            float(np.percentile(conformal_cal_scores, 95)),
+            conformal_q95,
         )
 
         # re-save with actual quantiles + network means + conformal scores
@@ -724,12 +743,15 @@ def main():
         logger.info("\n--- Computing Bootstrap Confidence Intervals ---")
 
         block_size = config.models.bootstrap_block_size
+        _bootstrap_rng = np.random.RandomState(RANDOM_SEED)
         mae_point, mae_lower, mae_upper = bootstrap_confidence_interval(
-            y_test, y_pred_best, mean_absolute_error, block_size=block_size
+            y_test, y_pred_best, mean_absolute_error,
+            n_bootstrap=config.models.n_bootstrap, block_size=block_size, rng=_bootstrap_rng
         )
         _rmse = lambda y_t, y_p: float(np.sqrt(mean_squared_error(y_t, y_p)))
         rmse_point, rmse_lower, rmse_upper = bootstrap_confidence_interval(
-            y_test, y_pred_best, _rmse, block_size=block_size
+            y_test, y_pred_best, _rmse,
+            n_bootstrap=config.models.n_bootstrap, block_size=block_size, rng=_bootstrap_rng
         )
 
         logger.info("Best model Test MAE:  %.3f (95%% CI: [%.3f, %.3f])",
@@ -758,6 +780,11 @@ def main():
             joblib.dump(model, artifact_dir / f'{name}_model.pkl')
             logger.info("Saved %s model", name)
 
+        all_metrics['_meta'] = {
+            'data_mode': data_mode,
+            'git_hash': _get_git_hash(),
+            'optuna_n_trials': config.models.optuna_n_trials,
+        }
         save_metrics(all_metrics, artifact_dir / 'all_metrics.json')
 
         # Save CV fold scores so the dashboard can load them cheaply instead

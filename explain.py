@@ -251,14 +251,14 @@ def generate_text_explanations(shap_values, feature_names, X, y_pred, config):
             shap_vals = shap_array[i]
             top_indices = np.argsort(np.abs(shap_vals))[-3:][::-1]
 
-            explanation = f"Prediction #{i+1}: {y_pred[i]:.1f} minutes delay\n"
+            explanation = f"Prediction #{i+1}: {y_pred[i]:.2f} delay severity (0=Good, 1=Minor, 2=Severe)\n"
             explanation += "Main factors:\n"
 
             for idx in top_indices:
                 feat = feature_names[idx] if idx < len(feature_names) else f"feature_{idx}"
                 val = shap_vals[idx]
                 direction = "increases" if val > 0 else "decreases"
-                explanation += f"  - {feat}: {direction} delay by {abs(val):.2f} min\n"
+                explanation += f"  - {feat}: {direction} severity by {abs(val):.4f}\n"
 
             explanations.append(explanation)
 
@@ -311,7 +311,7 @@ def main():
     latest_run_id = get_latest_run_id(config.paths.artifacts_dir)
 
     if latest_run_id is None:
-        logging.getLogger(__name__).error("No training runs found — run train.py first")
+        print("ERROR: No training runs found — run train.py first", file=__import__("sys").stderr)
         return
 
     artifact_dir = config.paths.artifacts_dir / latest_run_id
@@ -358,7 +358,7 @@ def main():
             explainer = create_shap_explainer(best_model, X_train, config)
             shap_values = compute_shap_values(
                 explainer, best_model, X_test, config,
-                max_samples=config.explainability.shap_background_size,
+                max_samples=config.explainability.shap_sample_size,
             )
 
             # get feature names from preprocessor
@@ -366,7 +366,10 @@ def main():
                 preprocessor = best_model.named_steps.get('preprocessor')
                 feature_names = [n.split('__', 1)[-1] for n in preprocessor.get_feature_names_out()]
             except Exception:
-                n_features = shap_values.values.shape[1] if shap_values is not None else len(X_test.columns)
+                if shap_values is not None:
+                    n_features = shap_values.values.shape[1]
+                else:
+                    n_features = len(X_test.columns)
                 feature_names = [f'feature_{i}' for i in range(n_features)]
 
             save_shap_cache(artifact_dir, X_test, shap_values, feature_names)

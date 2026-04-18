@@ -10,7 +10,7 @@ from datetime import datetime
 from utils import (
     setup_logging, generate_run_id, save_config, load_config_from_yaml,
     save_metrics, load_metrics, set_random_seeds, get_latest_run_id,
-    validate_datetime_column, format_duration, safe_divide
+    validate_datetime_column, format_duration,
 )
 
 # A simple mock Config for testing
@@ -135,8 +135,3 @@ def test_format_duration():
     assert format_duration(3660) == "1h 1m"
 
 
-def test_safe_divide():
-    assert safe_divide(10, 2) == 5.0
-    assert safe_divide(10, 0) == 0.0
-    assert safe_divide(10, np.nan) == 0.0
-    assert safe_divide(10, None) == 0.0

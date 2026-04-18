@@ -6,7 +6,7 @@ import numpy as np
 from datetime import datetime, timedelta
 
 from config import get_config
-from features import engineer_features
+from features import engineer_features, _TEMPORAL_FEATURE_PREFIXES
 from data import generate_synthetic_data
 from utils import check_data_leakage
 
@@ -42,10 +42,15 @@ def test_lag_features_no_leakage():
     assert pd.isna(df_featured['lag_delay_1'].iloc[2])
     assert pd.isna(df_featured['lag_delay_1'].iloc[3])
 
-    # After the NaN period, lag is based on delay_severity (all 0) — just verify no future leakage
-    # by checking lag values are from past rows (they must be <= max past severity)
-    if pd.notna(df_featured['lag_delay_1'].iloc[4]):
-        assert df_featured['lag_delay_1'].iloc[4] >= 0  # severity is non-negative
+    # lag_delay_1[i] must equal delay_severity[i-4] for all valid rows
+    df_featured = df_featured.reset_index(drop=True)
+    for i in range(4, len(df_featured)):
+        lag_val = df_featured['lag_delay_1'].iloc[i]
+        expected = df_featured['delay_severity'].iloc[i - 4]
+        if pd.notna(lag_val):
+            assert lag_val == expected, (
+                f"lag_delay_1 at row {i} = {lag_val} but delay_severity at row {i-4} = {expected}"
+            )
 
 
 def test_rolling_features_no_leakage():
@@ -129,18 +134,15 @@ def test_no_future_information_in_training():
 
     df_featured = engineer_features(line_df, config, is_training=True)
 
-    # verify lag values come from earlier rows
-    for idx in range(10, len(df_featured)):
+    # lag_delay_1[i] must equal delay_severity[i-4] exactly (1-hour lag at 15-min resolution)
+    df_featured = df_featured.reset_index(drop=True)
+    for idx in range(4, len(df_featured)):
         lag_delay_1 = df_featured.loc[idx, 'lag_delay_1']
-
         if pd.notna(lag_delay_1):
-            previous_severity = df_featured.loc[:idx-1, 'delay_severity'].values
-            # lag_delay_1 is now lag of delay_severity (0/1/2 ordinal).
-            # Use np.isclose to avoid spurious failures from floating-point
-            # representation differences across pandas versions or platforms.
-            assert any(np.isclose(lag_delay_1, previous_severity)), (
-                f"lag_delay_1 at row {idx} = {lag_delay_1:.4f} is not close to "
-                f"any previous delay_severity value — possible future leakage"
+            expected = df_featured.loc[idx - 4, 'delay_severity']
+            assert lag_delay_1 == expected, (
+                f"lag_delay_1 at row {idx} = {lag_delay_1} but delay_severity at row {idx-4} = {expected} "
+                f"— possible future leakage"
             )
 
 
@@ -168,11 +170,11 @@ def test_temporal_ordering_preserved():
 
     df_featured = engineer_features(df, config, is_training=True)
 
-    timestamps = df_featured['timestamp'].values
-    assert all(timestamps[i] <= timestamps[i+1] for i in range(len(timestamps)-1))
+    ts = pd.Series(df_featured['timestamp'].values)
+    assert (ts.diff().dropna() >= pd.Timedelta(0)).all()
 
-    delays = df_featured['delay_minutes'].values
-    assert all(delays[i] <= delays[i+1] for i in range(len(delays)-1))
+    delays = pd.Series(df_featured['delay_minutes'].values)
+    assert (delays.diff().dropna() >= 0).all()
 
 
 def test_first_observation_has_nan_lags():
@@ -198,8 +200,15 @@ def test_first_observation_has_nan_lags():
 
     df_featured = engineer_features(df, config, is_training=True)
 
-    assert pd.isna(df_featured['lag_delay_1'].iloc[0])
-    assert pd.isna(df_featured['rolling_mean_delay_3'].iloc[0])
+    # All temporal features must be NaN on the very first row of each line's series.
+    # Use the authoritative prefix list from features.py so this test stays in sync.
+    _temporal_cols = [c for c in df_featured.columns if any(
+        c.startswith(p) for p in _TEMPORAL_FEATURE_PREFIXES
+    )]
+    for col in _temporal_cols:
+        assert pd.isna(df_featured[col].iloc[0]), (
+            f"Expected NaN at row 0 for temporal feature '{col}' — shift may be missing"
+        )
 
 
 def test_check_data_leakage_utils():

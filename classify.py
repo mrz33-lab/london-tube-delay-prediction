@@ -155,8 +155,15 @@ def _evaluate_classifier(
     except Exception as e:
         logger.warning('Could not compute ROC-AUC: %s', e)
 
-    # Per-class metrics
-    report = classification_report(y_test, y_pred, target_names=class_names, output_dict=True, zero_division=0)
+    # Per-class metrics — supply explicit labels so the report works even when
+    # some classes are absent from the test split (e.g. small synthetic sets).
+    report = classification_report(
+        y_test, y_pred,
+        labels=list(range(len(class_names))),
+        target_names=class_names,
+        output_dict=True,
+        zero_division=0,
+    )
     metrics['per_class'] = {k: v for k, v in report.items() if k in class_names}
 
     return metrics

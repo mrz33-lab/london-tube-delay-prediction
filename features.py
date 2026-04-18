@@ -30,6 +30,22 @@ from line_metadata import (
 logger = logging.getLogger(__name__)
 
 
+# Features whose NaN at series-start means "no prior history", not "missing
+# measurement".  These are filled with 0 in prepare_features_for_model.
+# Used both here and by utils.check_data_leakage — single source of truth.
+_TEMPORAL_FEATURE_PREFIXES: tuple = (
+    'lag_',                       # e.g. lag_delay_1 — delay from N periods ago
+    'rolling_',                   # e.g. rolling_mean_delay_3 — window averages
+    'recent_disruption_rate',     # fraction of recent windows with disruptions
+    'temp_delta_1h',              # change in temperature vs. 1 period prior
+    'precipitation_delta_1h',     # change in rainfall vs. 1 period prior
+    'network_avg_delay',          # average delay across all lines at that time
+    'network_delay_volatility',   # standard deviation of delays across lines
+    'lines_disrupted_ratio',      # proportion of lines currently disrupted
+    'is_network_wide_disruption', # binary flag: majority of lines disrupted
+)
+
+
 # ---------------------------------------------------------------------------
 # main entry point
 # ---------------------------------------------------------------------------
@@ -84,7 +100,7 @@ def engineer_features(
         )
         logger.info(f"Created {feature_name}")
 
-        if window_hours >= 12:
+        if window_hours >= config.features.rolling_std_min_window:
             feature_name = f'rolling_std_delay_{window_hours}'
             df[feature_name] = df.groupby(group_col)[target_col].transform(
                 lambda x: x.shift(1).rolling(window=window_periods, min_periods=min(2, window_periods)).std()
@@ -264,7 +280,7 @@ def add_topology_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def add_train_frequency_features(df: pd.DataFrame) -> pd.DataFrame:
     """TPH-based features — low frequency lines are more fragile."""
-    max_peak_tph = max(LINE_PEAK_TPH.values())  # 36 for Victoria/Jubilee
+    max_peak_tph = max(LINE_PEAK_TPH.values())
 
     peak_tph    = df['line'].map(LINE_PEAK_TPH).fillna(12)
     offpeak_tph = df['line'].map(LINE_OFFPEAK_TPH).fillna(8)
@@ -291,7 +307,7 @@ def _verify_no_leakage(df: pd.DataFrame, config: Config):
     lag_features = [f'lag_delay_{lag}' for lag in config.features.lag_features]
     rolling_features = (
         [f'rolling_mean_delay_{w}' for w in config.features.rolling_windows]
-        + [f'rolling_std_delay_{w}' for w in config.features.rolling_windows if w >= 12]
+        + [f'rolling_std_delay_{w}' for w in config.features.rolling_windows if w >= config.features.rolling_std_min_window]
     )
     all_temporal = lag_features + rolling_features + ['recent_disruption_rate']
 
@@ -399,7 +415,7 @@ def load_feature_metadata(artifact_dir):
 def prepare_features_for_model(
     df: pd.DataFrame,
     feature_columns: List[str],
-    target_column: str = 'delay_minutes',
+    target_column: str = 'delay_severity',
 ) -> Tuple[pd.DataFrame, pd.Series]:
     """Prepare X/y matrices, filling NaNs with safe defaults."""
     df_clean = df.dropna(subset=[target_column]).copy()
@@ -416,19 +432,9 @@ def prepare_features_for_model(
     # indicates a data-quality gap — fill with the column median so we don't
     # inject a semantically wrong value (e.g. 0 °C for temperature).
     #
-    # IMPORTANT: only list prefixes whose NaN means "no prior history", NOT
-    # "missing measurement".  Do not add prefixes for features that have a
-    # meaningful non-zero expected value (e.g. a future crowding_demand_lag
-    # feature should use median fill, not zero).
-    _temporal_prefixes = (
-        'lag_', 'rolling_', 'recent_disruption_rate',
-        'temp_delta_1h', 'precipitation_delta_1h',
-        'network_avg_delay', 'network_delay_volatility',
-        'lines_disrupted_ratio', 'is_network_wide_disruption',
-    )
     for col in numeric_cols:
         if X[col].isna().any():
-            if any(col.startswith(p) or col == p for p in _temporal_prefixes):
+            if any(col.startswith(p) or col == p for p in _TEMPORAL_FEATURE_PREFIXES):
                 X[col] = X[col].fillna(0)
             else:
                 X[col] = X[col].fillna(X[col].median())

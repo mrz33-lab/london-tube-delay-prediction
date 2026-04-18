@@ -94,6 +94,9 @@ class FeatureConfig:
     # Number of past periods to use when computing the recent disruption rate.
     # Defaults to 12 (equivalent to 3 hours at 15-min data frequency).
     disruption_rate_window: int = 12
+    # Minimum rolling window (in hours) for which a rolling std feature is
+    # computed.  Shorter windows produce unreliable std estimates.
+    rolling_std_min_window: int = 12
     exclude_columns: List[str] = field(default_factory=lambda: [
         'timestamp', 'status', 'delay_minutes'
     ])
@@ -109,6 +112,11 @@ class ModelConfig:
     n_iter_search: int = 20
     # Block size for block bootstrap CI (None = auto: int(sqrt(n)))
     bootstrap_block_size: Optional[int] = None
+    # Number of bootstrap resamples for confidence interval estimation.
+    n_bootstrap: int = 1000
+    # Fraction of the test set used as the conformal calibration split.
+    # Standard split-conformal protocol: calibration must be separate from evaluation.
+    conformal_cal_ratio: float = 0.5
 
     models_to_train: List[str] = field(default_factory=lambda: [
         'naive', 'ridge', 'lightgbm'
@@ -132,6 +140,8 @@ class ModelConfig:
         'alpha': [0.001, 0.01, 0.1, 1.0, 10.0, 100.0]
     })
 
+    # Only used when LightGBM is unavailable and XGBoost is also missing
+    # (RandomForest fallback path in train.py).
     rf_params: dict = field(default_factory=lambda: {
         'n_estimators': [50, 100, 200],
         'max_depth': [5, 10, 15, None],
@@ -152,6 +162,10 @@ class ModelConfig:
             raise ValueError(f"n_iter_search must be >= 1, got {self.n_iter_search}")
         if self.optuna_n_trials < 1:
             raise ValueError(f"optuna_n_trials must be >= 1, got {self.optuna_n_trials}")
+        if not (0.0 < self.conformal_cal_ratio < 1.0):
+            raise ValueError(f"conformal_cal_ratio must be in (0, 1), got {self.conformal_cal_ratio}")
+        if self.bootstrap_block_size is not None and self.bootstrap_block_size < 1:
+            raise ValueError(f"bootstrap_block_size must be >= 1, got {self.bootstrap_block_size}")
 
 
 @dataclass
@@ -179,6 +193,14 @@ class ExplainabilityConfig:
     # Fallback prediction std (minutes) used only when a model was trained
     # before per-line residual quantiles were introduced.
     ci_fallback_std: float = 1.5
+
+    def __post_init__(self):
+        if self.shap_sample_size < 1:
+            raise ValueError(f"shap_sample_size must be >= 1, got {self.shap_sample_size}")
+        if self.shap_background_size < 1:
+            raise ValueError(f"shap_background_size must be >= 1, got {self.shap_background_size}")
+        if self.n_local_examples < 1:
+            raise ValueError(f"n_local_examples must be >= 1, got {self.n_local_examples}")
 
 
 @dataclass

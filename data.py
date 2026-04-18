@@ -14,6 +14,12 @@ from config import Config, RANDOM_SEED
 from utils import validate_datetime_column, set_random_seeds
 from exceptions import SchemaValidationError
 from line_metadata import LINE_BASE_DELAYS
+from data_collection import LINE_CROWDING_WEIGHT
+
+# Lines whose crowding weight places them in the top tier (weight >= 0.10).
+_HIGH_CROWDING_LINES = frozenset(
+    line for line, w in LINE_CROWDING_WEIGHT.items() if w >= 0.10
+)
 
 
 logger = logging.getLogger(__name__)
@@ -76,6 +82,14 @@ def validate_schema(df: pd.DataFrame, config: Config):
     missing_cols = required_cols - actual_cols
     if missing_cols:
         raise SchemaValidationError(f"Missing required columns: {missing_cols}")
+
+    _nan_checked = ['delay_minutes', 'delay_severity', 'temp_c', 'precipitation_mm',
+                    'humidity', 'crowding_index']
+    for col in _nan_checked:
+        if col in df.columns and df[col].isna().any():
+            raise SchemaValidationError(
+                f"Column '{col}' contains NaN values — check data pipeline before training"
+            )
 
     if not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
         raise SchemaValidationError("'timestamp' must be datetime type")
@@ -166,8 +180,8 @@ def generate_synthetic_data(config: Config) -> pd.DataFrame:
                 base_crowding += 0.4
             if is_weekend:
                 base_crowding -= 0.15
-            if line in ['Central', 'Northern', 'Victoria', 'Jubilee']:
-                base_crowding += 0.1  # busier lines
+            if line in _HIGH_CROWDING_LINES:
+                base_crowding += 0.1
 
             crowding_index = np.clip(base_crowding + rng.normal(0, 0.1), 0, 1)
 

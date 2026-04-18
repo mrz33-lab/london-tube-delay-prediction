@@ -9,17 +9,6 @@ production-quality interface. Every design decision — from the TfL colour pale
 to the theme-safe Plotly figures — is documented in the dissertation write-up.
 
 Run:  streamlit run app.py  (from project root, with .venv activated)
-
-KEY AUDIT FIXES vs old app/:
-  - Gauge scale corrected to 0-20 min (was 0-2 ordinal, wrong for delay_minutes target)
-  - Status thresholds fixed to 3 min / 10 min (matching config.data.status_good/minor_max)
-  - cache_data → cache_resource for model objects (no repeated pickle overhead)
-  - CSS never uses hardcoded 'color:white' or 'color:black' without theme check
-  - Every Plotly figure receives dynamic paper_bgcolor / font.color via _theme()
-  - render_about_tab now receives and uses dark-mode colours
-  - apply_custom_css called exactly once, not twice
-  - No 'return' inside a sub-tab context that exits an outer function
-  - Northern line colour darkened from #000000 to #333333 (invisible on dark bg)
 """
 
 from __future__ import annotations
@@ -28,6 +17,7 @@ import sys
 import json
 import logging
 import re
+import subprocess
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -111,6 +101,34 @@ PEAK_HOURS: List[Tuple[int, int]] = [(7, 9), (17, 19)]
 # time-series charts to the most recent 24 hours of data.
 _RECENT_TEST_SAMPLES: int = 288
 
+# Computed once at import; survives all Streamlit reruns.
+def _git_commit() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL,
+            cwd=str(ROOT),
+        ).decode().strip()
+    except Exception:
+        return "unknown"
+
+_BUILD_COMMIT: str = _git_commit()
+
+
+def _build_info() -> str:
+    """Return a one-line build stamp for the footer."""
+    try:
+        import lightgbm as _lgb
+        lgb_ver = _lgb.__version__
+    except Exception:
+        lgb_ver = "?"
+    pv = sys.version_info
+    return (
+        f"Commit: {_BUILD_COMMIT} &nbsp;·&nbsp; "
+        f"Python {pv.major}.{pv.minor}.{pv.micro} &nbsp;·&nbsp; "
+        f"LightGBM {lgb_ver}"
+    )
+
 
 def _default_crowding(line: str, hour: int) -> float:
     """Default sidebar crowding value based on line baseline and peak/off-peak."""
@@ -118,13 +136,6 @@ def _default_crowding(line: str, hour: int) -> float:
     if any(start <= hour < end for start, end in PEAK_HOURS):
         return _clamp(base * 1.6, 0.0, 1.0)
     return _clamp(base * 0.9, 0.0, 1.0)
-
-# Fallback metrics (severity scale 0-2) — used only when artifacts are missing
-_FALLBACK_METRICS: Dict = {
-    "best":  {"test_mae": 0.118, "test_rmse": 0.281, "test_r2": 0.857},
-    "ridge": {"test_mae": 0.180, "test_rmse": 0.346, "test_r2": 0.783},
-    "naive": {"test_mae": 0.498, "test_rmse": 0.969, "test_r2": -0.698},
-}
 
 WEATHER_OPTIONS:  List[str]        = ["Clear", "Light Rain", "Heavy Rain", "Wind", "Fog"]
 WEATHER_ICONS:    Dict[str, str]   = {"Clear": "☀️", "Light Rain": "🌦️",
@@ -404,7 +415,37 @@ def apply_custom_css() -> None:
 
     /* ── Alert rounding ───────────────────────────────────────────────── */
     .stAlert { border-radius:var(--radius) !important; }
+
+    /* ── Risk count cards (Risk Map tab) ──────────────────────────────── */
+    .risk-count-card {
+        background:var(--rcc-bg); border:1px solid var(--rcc-border);
+        border-left:5px solid var(--rcc-accent);
+        border-radius:10px; padding:0.9rem 1.1rem; font-family:'Inter',sans-serif;
+    }
+    .risk-count-card .rcc-label {
+        font-size:0.72rem; color:var(--rcc-sub);
+        text-transform:uppercase; letter-spacing:.06em;
+    }
+    .risk-count-card .rcc-value {
+        font-size:2rem; font-weight:800; color:var(--rcc-accent);
+    }
+
+    /* ── Risk detail cards (Risk Map tab) ─────────────────────────────── */
+    .risk-detail-card {
+        background:var(--rdc-bg); border:1px solid var(--rdc-accent);
+        border-left:5px solid var(--rdc-line);
+        border-radius:12px; padding:0.85rem 1rem;
+        font-family:'Inter',sans-serif; margin-bottom:0.5rem;
+    }
+    .risk-detail-card .rdc-title { font-weight:700; font-size:0.9rem; color:var(--rdc-txt); }
+    .risk-detail-card .rdc-row   { display:flex; justify-content:space-between; margin-top:0.4rem; }
+    .risk-detail-card .rdc-risk  { font-size:1.4rem; font-weight:800; color:var(--rdc-accent); }
+    .risk-detail-card .rdc-sev   { font-size:0.8rem; color:var(--rdc-sub); align-self:flex-end; }
+    .risk-detail-card .rdc-meta  { font-size:0.75rem; color:var(--rdc-sub); margin-top:0.3rem; }
     """
+    # base64 encodes the CSS *text* so it can be embedded safely inside a JS
+    # string literal — no font file is embedded here; 'Inter' loads via the
+    # system font stack fallback chain defined in the font-family rule above.
     _b64 = base64.b64encode(_CSS.encode()).decode()
     components.html(
         f"""<script>
@@ -433,9 +474,11 @@ def _load_models(artifact_dir: str) -> Dict:
     import joblib
     try:
         import train  # noqa: F401
+        # joblib unpickling resolves class names against __main__; register here so
+        # NaiveBaselineModel is found when the pickle was saved from train.py.
         sys.modules["__main__"].NaiveBaselineModel = train.NaiveBaselineModel  # type: ignore[attr-defined]
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Could not register NaiveBaselineModel in __main__: %s", exc)
 
     path = Path(artifact_dir)
     out: Dict = {}
@@ -630,15 +673,10 @@ def _load_analysis_outputs(analysis_dir: str) -> Dict:
 def _compute_cv_mae_breakdown(artifact_dir: str) -> Optional[Dict]:
     """Return fold-level CV MAE breakdown.
 
-    Fast path: loads cv_fold_scores.json written by train.py — zero model
-    loading cost, runs in milliseconds.
-    Slow fallback: re-runs cross_val_score for runs produced before the fast
-    path was added.  This can be slow and memory-intensive; once a run has
-    the saved JSON the fallback is never reached again.
+    Loads cv_fold_scores.json written by train.py — zero model loading cost.
+    Returns None for runs predating that file; re-train to generate it.
     """
     path = Path(artifact_dir)
-
-    # ── Fast path ────────────────────────────────────────────────────────
     saved = path / "cv_fold_scores.json"
     if saved.exists():
         try:
@@ -646,39 +684,7 @@ def _compute_cv_mae_breakdown(artifact_dir: str) -> Optional[Dict]:
                 return json.load(f)
         except Exception as exc:
             logger.warning("Could not load cv_fold_scores.json: %s", exc)
-
-    # ── Slow fallback (old runs only) ─────────────────────────────────
-    try:
-        import joblib
-        from sklearn.model_selection import TimeSeriesSplit, cross_val_score
-
-        x_path = path / "X_train.parquet"
-        y_path = path / "y_train.csv"
-        model_path = path / "best_model.pkl"
-        if not (x_path.exists() and y_path.exists() and model_path.exists()):
-            return None
-
-        X_train = pd.read_parquet(x_path)
-        y_train = pd.read_csv(y_path).iloc[:, 0]
-        model = joblib.load(model_path)
-
-        n_splits = int(get_config().models.cv_splits)
-        tscv = TimeSeriesSplit(n_splits=n_splits)
-        scores = cross_val_score(
-            model, X_train, y_train,
-            cv=tscv, scoring="neg_mean_absolute_error", n_jobs=1,
-        )
-        fold_mae = [float(-s) for s in scores]
-        folds = [
-            {"fold": i + 1, "train_n": int(len(tr)),
-             "val_n": int(len(va)), "mae": fold_mae[i]}
-            for i, (tr, va) in enumerate(tscv.split(X_train))
-        ]
-        return {"mean": float(np.mean(fold_mae)), "std": float(np.std(fold_mae)),
-                "folds": folds}
-    except Exception as exc:
-        logger.warning("Could not compute CV MAE breakdown: %s", exc)
-        return None
+    return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -779,11 +785,11 @@ def _predict_with_predictor(
 ) -> Optional[Dict[str, float]]:
     """Predict a single scenario using one predictor instance.
 
-    Uses predict_from_features (public API) after feature engineering so the
-    dashboard never calls private underscore methods on the predictor.
+    Uses the public engineer_features wrapper then predict_from_features so the
+    dashboard does not call private underscore methods on the predictor.
     """
     try:
-        features = predictor._engineer_features(
+        features = predictor.engineer_features(
             line=line,
             target_datetime=target_datetime,
             weather_forecast={
@@ -1403,7 +1409,8 @@ def _fetch_tfl_status() -> Dict[str, str]:
             desc     = statuses[0].get("statusSeverityDescription", "Unknown")
             out[name] = desc
         return out
-    except Exception:
+    except Exception as exc:
+        logger.warning("TfL status fetch failed: %s", exc)
         return {}
 
 
@@ -1508,39 +1515,58 @@ def _render_header() -> None:
 
 
 def _enable_live_clock() -> None:
-    """Keep the header clock live via a 1-second JS interval.
+    """Keep the header clock live via a 1-second timer.
     No page reload — data freshness is handled by cache TTLs and the
     manual Refresh Data button in the sidebar.
+    Falls back to a local requestAnimationFrame loop when the iframe is
+    sandboxed and cannot write to window.parent (e.g. Streamlit Cloud).
     """
     import streamlit.components.v1 as components
 
     components.html(
         """<script>
         (function() {
-            const parentWin = window.parent;
-            const doc = parentWin.document;
-            function updateClock() {
+            function formatClock(now) {
+                return new Intl.DateTimeFormat('en-GB', {
+                    timeZone: 'Europe/London', hour: '2-digit', minute: '2-digit', hour12: false
+                }).format(now);
+            }
+            function formatDate(now) {
+                return new Intl.DateTimeFormat('en-GB', {
+                    timeZone: 'Europe/London', weekday: 'long', day: '2-digit', month: 'long', year: 'numeric'
+                }).format(now);
+            }
+            function applyToDoc(doc) {
                 const now = new Date();
                 const clockEl = doc.getElementById('tfl-live-clock');
                 const dateEl  = doc.getElementById('tfl-live-date');
                 const subEl   = doc.getElementById('tfl-live-refresh');
-                if (clockEl) {
-                    clockEl.textContent = new Intl.DateTimeFormat('en-GB', {
-                        timeZone: 'Europe/London', hour: '2-digit', minute: '2-digit', hour12: false
-                    }).format(now);
-                }
-                if (dateEl) {
-                    dateEl.textContent = new Intl.DateTimeFormat('en-GB', {
-                        timeZone: 'Europe/London', weekday: 'long', day: '2-digit', month: 'long', year: 'numeric'
-                    }).format(now);
-                }
-                if (subEl) {
-                    subEl.textContent = 'Live clock · use Refresh Data to reload';
-                }
+                if (clockEl) clockEl.textContent = formatClock(now);
+                if (dateEl)  dateEl.textContent  = formatDate(now);
+                if (subEl)   subEl.textContent   = 'Live clock \u00b7 use Refresh Data to reload';
             }
-            updateClock();
-            if (!parentWin.__tflClockInterval) {
-                parentWin.__tflClockInterval = parentWin.setInterval(updateClock, 1000);
+
+            // Primary path: update parent document via setInterval.
+            try {
+                const parentWin = window.parent;
+                applyToDoc(parentWin.document);
+                if (!parentWin.__tflClockInterval) {
+                    parentWin.__tflClockInterval = parentWin.setInterval(
+                        function() { applyToDoc(parentWin.document); }, 1000
+                    );
+                }
+            } catch (e) {
+                // Sandboxed iframe: fall back to a local RAF-paced loop that
+                // updates elements in this iframe's own document.
+                var _lastTick = 0;
+                function rafTick(ts) {
+                    if (ts - _lastTick >= 1000) {
+                        applyToDoc(document);
+                        _lastTick = ts;
+                    }
+                    window.requestAnimationFrame(rafTick);
+                }
+                window.requestAnimationFrame(rafTick);
             }
         })();
         </script>""",
@@ -1771,7 +1797,7 @@ def _render_sidebar(metrics: Dict, best_name: str) -> Dict:
         st.cache_resource.clear()
         st.rerun()
 
-    m = metrics.get("best", _FALLBACK_METRICS["best"])
+    m = metrics.get("best", {})
     mae = m.get("test_mae", 2.41)
     r2 = m.get("test_r2", 0.749)
     st.sidebar.markdown(f"""
@@ -1813,7 +1839,27 @@ def _render_sidebar(metrics: Dict, best_name: str) -> Dict:
     )
 
 
-@st.cache_data(show_spinner=False, ttl=60)
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_predict(
+    artifact_dir: str,
+    line: str,
+    target_datetime_iso: str,
+    temp_c: float,
+    precip_mm: float,
+    humidity: int,
+    crowding_index: Optional[float],
+) -> Optional[Dict[str, float]]:
+    """Cache-friendly wrapper: takes only hashable args so cache_data can key on them."""
+    predictor = _get_future_predictor(artifact_dir)
+    if predictor is None:
+        return None
+    return _predict_with_predictor(
+        predictor, line, datetime.fromisoformat(target_datetime_iso),
+        temp_c, precip_mm, humidity, crowding_index,
+    )
+
+
+@st.cache_data(ttl=300, show_spinner=False)
 def _predict_24h_scenario(
     artifact_dir: str,
     line: str,
@@ -2117,26 +2163,26 @@ def _tab_predictions(models: Dict, tabular: Dict, sb: Dict, t: Dict, artifact_di
         }
         target_dt = _resolve_point_datetime(hour, dow)
         seas = _SEASONAL_WEATHER[target_dt.month]
-        _pred_obj = _get_future_predictor(artifact_dir)
+        target_dt_iso = target_dt.isoformat()
         top3_data: List[Tuple[str, float, str]] = []
-        if _pred_obj is not None and live_pred is not None:
+        if live_pred is not None:
             # Zero-crowding + seasonal weather = pure temporal signal.
             # Using crowding=0.0 (not None) ensures _estimate_crowding() never
             # runs, so the baseline is always the same reference point.
-            _r_base = _predict_with_predictor(
-                _pred_obj, line, target_dt,
+            _r_base = _cached_predict(
+                artifact_dir, line, target_dt_iso,
                 seas["temp_c"], seas["precip_mm"], int(seas["humidity"]),
                 crowding_index=0.0,
             )
             # Weather contribution: user weather vs seasonal weather, both at zero crowding.
-            _r_weather = _predict_with_predictor(
-                _pred_obj, line, target_dt,
+            _r_weather = _cached_predict(
+                artifact_dir, line, target_dt_iso,
                 temp_c, precip_mm, humidity,
                 crowding_index=0.0,
             )
             # Crowding contribution: user crowding vs zero crowding, seasonal weather.
-            _r_crowd = _predict_with_predictor(
-                _pred_obj, line, target_dt,
+            _r_crowd = _cached_predict(
+                artifact_dir, line, target_dt_iso,
                 seas["temp_c"], seas["precip_mm"], int(seas["humidity"]),
                 crowding_index=crowding_index,
             )
@@ -2193,8 +2239,8 @@ def _tab_predictions(models: Dict, tabular: Dict, sb: Dict, t: Dict, artifact_di
                     top3_sorted = sorted(group_imp.items(), key=lambda x: -x[1])[:3]
                     _cols = ["#0098D4", "#E86B00", "#00782A"]
                     top3_data = [(n, v, _cols[i]) for i, (n, v) in enumerate(top3_sorted)]
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("Feature importance fallback failed: %s", exc)
 
         if not top3_data:
             top3_data = [
@@ -2345,9 +2391,13 @@ def _tab_predictions(models: Dict, tabular: Dict, sb: Dict, t: Dict, artifact_di
         export_df["scenario_b_ci_lo_sev"] = compare_lo
         export_df["scenario_b_ci_hi_sev"] = compare_hi
         export_df["scenario_b_minutes_est"] = [v * SEV_TO_MIN for v in compare_day_data]
+    _pred_csv_bytes = export_df.to_csv(index=False).encode()
+    _pred_mb = len(_pred_csv_bytes) / 1_048_576
+    if _pred_mb > 10:
+        st.warning(f"CSV is {_pred_mb:.1f} MB — download may be slow.")
     st.download_button(
-        label="Download 24-hour forecast CSV",
-        data=export_df.to_csv(index=False).encode(),
+        label=f"Download 24-hour forecast CSV ({_pred_mb:.1f} MB)",
+        data=_pred_csv_bytes,
         file_name=f"{line.lower().replace(' & ', '_').replace(' ', '_')}_24h_forecast.csv",
         mime="text/csv",
     )
@@ -2523,13 +2573,13 @@ def _ablation_plotly_chart(ablation: Dict, t: Dict) -> go.Figure:
 
 def _tab_performance(tabular: Dict, t: Dict) -> None:
     """KPI row · model comparison · feature importance · error analysis · per-line table."""
-    metrics    = tabular.get("metrics", _FALLBACK_METRICS)
+    metrics    = tabular.get("metrics", {})
     test_preds = tabular.get("test_predictions")
     feat_imp   = tabular.get("feature_importance")
     comp_df    = tabular.get("model_comparison")
 
-    best  = metrics.get("best",  _FALLBACK_METRICS["best"])
-    naive = metrics.get("naive", _FALLBACK_METRICS["naive"])
+    best  = metrics.get("best",  {})
+    naive = metrics.get("naive", {})
     mae   = best.get("test_mae",  2.41)
     rmse  = best.get("test_rmse", 4.91)
     r2    = best.get("test_r2",  0.749)
@@ -2769,11 +2819,6 @@ def _tab_performance(tabular: Dict, t: Dict) -> None:
             a1.metric("Lines where ARIMA wins", len(arima_wins))
             a2.metric("Lines where LightGBM wins", len(lgbm_wins))
 
-            paper_bg = t.get("paper_bg", "#ffffff")
-            plot_bg  = t.get("plot_bg",  "#fafbfc")
-            font_col = t.get("font_col", "#1a1a2e")
-            grid_col = t.get("grid_col", "#e9ecef")
-
             fig_arima = go.Figure()
             fig_arima.add_trace(go.Bar(
                 name="ARIMA/SARIMA",
@@ -2787,16 +2832,13 @@ def _tab_performance(tabular: Dict, t: Dict) -> None:
                 y=arima_df["lgbm_mae"],
                 marker_color="#1f77b4",
             ))
+            fig_arima = _fig_base(fig_arima, t, "ARIMA vs LightGBM MAE per Line", height=380)
             fig_arima.update_layout(
                 barmode="group",
-                paper_bgcolor=paper_bg, plot_bgcolor=plot_bg,
-                font=dict(color=font_col, family="'Inter', sans-serif"),
                 margin=dict(l=20, r=20, t=50, b=20),
-                title=dict(text="ARIMA vs LightGBM MAE per Line", font=dict(size=14, color=font_col), x=0.01),
-                xaxis=dict(gridcolor=grid_col),
-                yaxis=dict(title="MAE (severity units)", gridcolor=grid_col),
+                xaxis=dict(gridcolor=t["grid"]),
+                yaxis=dict(title="MAE (severity units)", gridcolor=t["grid"]),
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                height=380,
             )
             st.plotly_chart(fig_arima, width='stretch', key="perf_arima_comparison")
 
@@ -2857,11 +2899,6 @@ def _tab_performance(tabular: Dict, t: Dict) -> None:
         sel_data = analysis["shap_selection"]
         sel_results = sel_data.get("results", [])
         if sel_results:
-            paper_bg = t.get("paper_bg", "#ffffff")
-            plot_bg  = t.get("plot_bg",  "#fafbfc")
-            font_col = t.get("font_col", "#1a1a2e")
-            grid_col = t.get("grid_col", "#e9ecef")
-
             labels      = [r["label"]       for r in sel_results]
             train_maes  = [r["train_mae"]   for r in sel_results]
             val_maes    = [r["cv_val_mae"]  for r in sel_results]
@@ -2871,17 +2908,13 @@ def _tab_performance(tabular: Dict, t: Dict) -> None:
             fig_sel.add_trace(go.Bar(name="Train MAE",  x=labels, y=train_maes,  marker_color="#1f77b4"))
             fig_sel.add_trace(go.Bar(name="CV-Val MAE", x=labels, y=val_maes,    marker_color="#ff7f0e"))
             fig_sel.add_trace(go.Bar(name="Test MAE",   x=labels, y=test_maes,   marker_color="#2ca02c"))
+            fig_sel = _fig_base(fig_sel, t, "Train / CV-Val / Test MAE by Feature Count", height=370)
             fig_sel.update_layout(
                 barmode="group",
-                paper_bgcolor=paper_bg, plot_bgcolor=plot_bg,
-                font=dict(color=font_col, family="'Inter', sans-serif"),
                 margin=dict(l=20, r=20, t=50, b=20),
-                title=dict(text="Train / CV-Val / Test MAE by Feature Count",
-                           font=dict(size=14, color=font_col), x=0.01),
-                xaxis=dict(gridcolor=grid_col),
-                yaxis=dict(title="MAE (severity units)", gridcolor=grid_col),
+                xaxis=dict(gridcolor=t["grid"]),
+                yaxis=dict(title="MAE (severity units)", gridcolor=t["grid"]),
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                height=370,
             )
             st.plotly_chart(fig_sel, width='stretch', key="perf_shap_selection")
 
@@ -2940,11 +2973,6 @@ def _tab_performance(tabular: Dict, t: Dict) -> None:
         )
 
         if eq_records:
-            paper_bg = t.get("paper_bg", "#ffffff")
-            plot_bg  = t.get("plot_bg",  "#fafbfc")
-            font_col = t.get("font_col", "#1a1a2e")
-            grid_col = t.get("grid_col", "#e9ecef")
-
             eq_df = pd.DataFrame(eq_records)
 
             fig_eq = go.Figure()
@@ -2980,20 +3008,18 @@ def _tab_performance(tabular: Dict, t: Dict) -> None:
                     showlegend=True,
                 ))
 
+            fig_eq = _fig_base(
+                fig_eq, t,
+                f"MAE vs Community Deprivation (Spearman ρ = {rho:+.3f}, p = {p_val:.3f})",
+                height=420,
+            )
             fig_eq.update_layout(
-                paper_bgcolor=paper_bg, plot_bgcolor=plot_bg,
-                font=dict(color=font_col, family="'Inter', sans-serif"),
                 margin=dict(l=20, r=20, t=60, b=20),
-                title=dict(
-                    text=f"MAE vs Community Deprivation (Spearman ρ = {rho:+.3f}, p = {p_val:.3f})",
-                    font=dict(size=14, color=font_col), x=0.01,
-                ),
                 xaxis=dict(
                     title="Catchment-area IMD score (% most deprived LSOAs, higher = more deprived)",
-                    gridcolor=grid_col,
+                    gridcolor=t["grid"],
                 ),
-                yaxis=dict(title="Test MAE (severity units)", gridcolor=grid_col),
-                height=420,
+                yaxis=dict(title="Test MAE (severity units)", gridcolor=t["grid"]),
                 showlegend=True,
             )
             st.plotly_chart(fig_eq, width='stretch', key="perf_equity_scatter")
@@ -3060,12 +3086,16 @@ def _tab_line_comparison(tabular: Dict, t: Dict) -> None:
     # ── Parallel coordinates ──────────────────────────────────────────────────
     st.markdown("### Parallel Coordinates")
     metrics_cols = ["MAE", "RMSE", "R²", "Avg Delay", "Peak Delay"]
-    n = max(len(fdf) - 1, 1)
+    _par_clrs = [LINE_COLOURS.get(ln, "#003B6F") for ln in fdf["Line"]]
+    _n = max(len(fdf) - 1, 1)
+    _par_scale = [[i / _n, c] for i, c in enumerate(_par_clrs)]
+    # Plotly requires at least two colorscale stops (at 0 and 1).
+    if len(_par_scale) == 1:
+        _par_scale = [[0.0, _par_clrs[0]], [1.0, _par_clrs[0]]]
     fig_par = go.Figure(go.Parcoords(
         line=dict(
             color=list(range(len(fdf))),
-            colorscale=[[i / n, LINE_COLOURS.get(ln, "#003B6F")]
-                        for i, ln in enumerate(fdf["Line"])],
+            colorscale=_par_scale,
         ),
         dimensions=[
             dict(label=col, values=fdf[col].tolist(),
@@ -3331,9 +3361,16 @@ def _tab_data_collection(t: Dict) -> None:
 
     st.markdown("---")
     st.markdown("### Export")
+    _csv_bytes = df.to_csv(index=False).encode()
+    _size_mb = len(_csv_bytes) / 1_048_576
+    if _size_mb > 10:
+        st.warning(
+            f"This export is {_size_mb:.1f} MB ({len(df):,} rows). "
+            "Downloading may be slow on a poor connection."
+        )
     st.download_button(
-        label="Download tfl_merged.csv",
-        data=df.to_csv(index=False).encode(),
+        label=f"Download tfl_merged.csv ({_size_mb:.1f} MB)",
+        data=_csv_bytes,
         file_name=f"tfl_merged_{datetime.now().strftime('%Y%m%d')}.csv",
         mime="text/csv")
 
@@ -3342,7 +3379,7 @@ def _tab_data_collection(t: Dict) -> None:
 # TAB 6 — RISK MAP
 # ─────────────────────────────────────────────────────────────────────────────
 
-_RISK_THRESHOLDS: Dict[str, float] = {"Low": 0.5, "Medium": 1.2}
+_RISK_THRESHOLDS: Dict[str, float] = {"Low": STATUS_GOOD_MAX, "Medium": STATUS_MINOR_MAX}
 _RISK_COLOURS:    Dict[str, str]   = {
     "Low":    "#00782A",
     "Medium": "#E86B00",
@@ -3447,8 +3484,8 @@ def _tab_risk(tabular: Dict, t: Dict) -> None:
 
     Risk bands (severity 0–2 scale):
       Low    — median predicted severity < 0.5  (Good Service expected)
-      Medium — 0.5 – 1.2  (Minor Delays expected)
-      High   — ≥ 1.2  (Severe Delays expected)
+      Medium — 0.5 – 1.5  (Minor Delays expected)
+      High   — ≥ 1.5  (Severe Delays expected)
 
     Shows a KPI summary row, a colour-coded horizontal bar chart, and
     per-line detail cards with median/P95 severity and test-set MAE.
@@ -3466,7 +3503,7 @@ def _tab_risk(tabular: Dict, t: Dict) -> None:
         "Risk level per line is derived from the **median predicted severity** "
         "on the held-out 20 % test set (strict chronological split). "
         "Severity is the real TfL label — 0 = Good Service · 1 = Minor Delays · 2 = Severe Delays. "
-        "Thresholds: **Low** < 0.5 · **Medium** 0.5–1.2 · **High** ≥ 1.2."
+        f"Thresholds: **Low** < {STATUS_GOOD_MAX} · **Medium** {STATUS_GOOD_MAX}–{STATUS_MINOR_MAX} · **High** ≥ {STATUS_MINOR_MAX}."
     )
 
     # ── Per-line statistics ───────────────────────────────────────────────────
@@ -3500,16 +3537,13 @@ def _tab_risk(tabular: Dict, t: Dict) -> None:
     for col, level in zip([k1, k2, k3], ["High", "Medium", "Low"]):
         n      = int(counts.get(level, 0))
         colour = _RISK_COLOURS[level]
-        col.markdown(f"""
-        <div style="background:{bg}; border:1px solid {bdr}; border-left:5px solid {colour};
-                    border-radius:10px; padding:0.9rem 1.1rem; font-family:'Inter',sans-serif;">
-            <div style="font-size:0.72rem; color:{sub}; text-transform:uppercase;
-                        letter-spacing:.06em;">{level} Risk Lines</div>
-            <div style="font-size:2rem; font-weight:800; color:{colour};">{n}</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    st.markdown("<br>", unsafe_allow_html=True)
+        col.markdown(
+            f'<div class="risk-count-card" style="--rcc-accent:{colour};'
+            f'--rcc-bg:{bg};--rcc-border:{bdr};--rcc-sub:{sub};">'
+            f'<div class="rcc-label">{level} Risk Lines</div>'
+            f'<div class="rcc-value">{n}</div></div>',
+            unsafe_allow_html=True,
+        )
 
     # ── Horizontal bar chart ─────────────────────────────────────────────────
     bar_colours = [_RISK_COLOURS[r] for r in risk_df["risk"]]
@@ -3555,9 +3589,11 @@ def _tab_risk(tabular: Dict, t: Dict) -> None:
         key="risk_schematic_map",
     )
     st.caption(
-        "Each line is coloured by its risk band: "
-        "🟢 Low (median sev < 0.5) · 🟠 Medium (0.5–1.2) · 🔴 High (≥ 1.2). "
-        "Station dots mark key interchanges."
+        f"Each line is coloured by its risk band: "
+        f"🟢 Low (median sev < {STATUS_GOOD_MAX}) · "
+        f"🟠 Medium ({STATUS_GOOD_MAX}–{STATUS_MINOR_MAX}) · "
+        f"🔴 High (≥ {STATUS_MINOR_MAX}). "
+        f"Station dots mark key interchanges."
     )
     st.markdown("---")
 
@@ -3574,25 +3610,18 @@ def _tab_risk(tabular: Dict, t: Dict) -> None:
             colour  = _RISK_COLOURS[r["risk"]]
             card_bg = _RISK_BG[r["risk"]] if not t["dark"] else t["card_bg"]
             lc      = LINE_COLOURS.get(r["line"], "#003B6F")
-            col.markdown(f"""
-            <div style="background:{card_bg}; border:1px solid {colour};
-                        border-left:5px solid {lc};
-                        border-radius:12px; padding:0.85rem 1rem;
-                        font-family:'Inter',sans-serif; margin-bottom:0.5rem;">
-                <div style="font-weight:700; font-size:0.9rem; color:{txt};">{r['line']}</div>
-                <div style="display:flex; justify-content:space-between; margin-top:0.4rem;">
-                    <span style="font-size:1.4rem; font-weight:800; color:{colour};">{r['risk']}</span>
-                    <span style="font-size:0.8rem; color:{sub}; align-self:flex-end;">
-                        med {r['median_pred']:.2f} sev
-                    </span>
-                </div>
-                <div style="font-size:0.75rem; color:{sub}; margin-top:0.3rem;">
-                    p95 {r['p95_pred']:.2f} &nbsp;·&nbsp; MAE {r['mae']:.3f}
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-
-    st.markdown("<br>", unsafe_allow_html=True)
+            col.markdown(
+                f'<div class="risk-detail-card" style="--rdc-accent:{colour};'
+                f'--rdc-bg:{card_bg};--rdc-line:{lc};--rdc-txt:{txt};--rdc-sub:{sub};">'
+                f'<div class="rdc-title">{r["line"]}</div>'
+                f'<div class="rdc-row">'
+                f'<span class="rdc-risk">{r["risk"]}</span>'
+                f'<span class="rdc-sev">med {r["median_pred"]:.2f} sev</span>'
+                f'</div>'
+                f'<div class="rdc-meta">p95 {r["p95_pred"]:.2f} &nbsp;·&nbsp; MAE {r["mae"]:.3f}</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
     st.caption(
         "Risk is computed from the best model's predictions on the held-out 20 % "
         "test set (chronological split). This is a retrospective measure for "
@@ -3610,13 +3639,14 @@ def _tab_about(tabular: Dict, t: Dict) -> None:
     badges · model card · ethics. I avoided a plain wall of text so the tab
     reads as a professional portfolio piece for the dissertation demo.
     """
-    metrics   = tabular.get("metrics", _FALLBACK_METRICS)
+    metrics   = tabular.get("metrics", {})
     best_name = tabular.get("best_model_name", "lightgbm").upper()
-    best_m    = metrics.get("best", _FALLBACK_METRICS["best"])
-    mae  = best_m.get("test_mae",  2.41)
-    rmse = best_m.get("test_rmse", 4.91)
-    r2   = best_m.get("test_r2",  0.749)
-    n_mae = metrics.get("naive", _FALLBACK_METRICS["naive"]).get("test_mae", 7.26)
+    best_m    = metrics.get("best", {})
+    mae   = best_m.get("test_mae")
+    rmse  = best_m.get("test_rmse")
+    r2    = best_m.get("test_r2")
+    n_mae = metrics.get("naive", {}).get("test_mae")
+    _f = lambda v, fmt=".3f", sfx="": (format(v, fmt) + sfx) if v is not None else "N/A"
 
     st.markdown(f"""
     <div style="background:linear-gradient(135deg,#001F4D 0%,#003B6F 55%,#005DB5 100%);
@@ -3631,11 +3661,11 @@ def _tab_about(tabular: Dict, t: Dict) -> None:
             f'letter-spacing:.06em;color:#FFFFFF;">{lab}</div>'
             f'<div style="font-size:1.2rem;font-weight:700;color:#FFFFFF;">{val}</div></div>'
             for lab, val in [("Best Model", best_name),
-                             ("Test MAE", f"{mae:.3f} sev"),
-                             ("R²", f"{r2:.3f}"),
+                             ("Test MAE", _f(mae, ".3f", " sev")),
+                             ("R²", _f(r2, ".3f")),
                              ("Lines", "11"),
                              ("Features", "40"),
-                             ("vs Naive", f"−{(1-mae/n_mae)*100:.0f}%")])}
+                             ("vs Naive", f"−{(1-mae/n_mae)*100:.0f}%" if mae is not None and n_mae else "N/A")])}
       </div>
     </div>""", unsafe_allow_html=True)
 
@@ -3718,8 +3748,8 @@ def _tab_about(tabular: Dict, t: Dict) -> None:
               <div style="font-weight:700;color:{t['font']};margin-bottom:.45rem;">
                 Reproducibility</div>
               <div style="font-size:.83rem;color:{t['muted']};">
-                Commit: 0d2fdc2<br>Random seed: 42<br>
-                Python 3.14.2<br>LightGBM 4.6.0</div>
+                Commit: {_BUILD_COMMIT}<br>Random seed: 42<br>
+                Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}<br>LightGBM {__import__('lightgbm').__version__}</div>
             </div>""", unsafe_allow_html=True)
 
     # ── Tech Stack ────────────────────────────────────────────────────────────
@@ -3757,7 +3787,7 @@ def _tab_about(tabular: Dict, t: Dict) -> None:
     # ── Model Card ────────────────────────────────────────────────────────────
     with about_tabs[3]:
         st.markdown("### Model Card")
-        r_mae = metrics.get("ridge", _FALLBACK_METRICS["ridge"]).get("test_mae", 2.80)
+        r_mae = metrics.get("ridge", {}).get("test_mae", 2.80)
         test_mae_ci = best_m.get("test_mae_ci")
         test_rmse_ci = best_m.get("test_rmse_ci")
         st.markdown(f"""
@@ -3865,6 +3895,14 @@ def main() -> None:
 
     artifact_dir = str(cfg.paths.artifacts_dir / latest_run)
 
+    # If the user re-trained (artifact_dir changed), stale scenario_a/b session
+    # state from the old run would produce mismatched predictions. Clear it.
+    if st.session_state.get("_artifact_dir") != artifact_dir:
+        for key in list(st.session_state.keys()):
+            if key.startswith("scenario_"):
+                del st.session_state[key]
+        st.session_state["_artifact_dir"] = artifact_dir
+
     with st.spinner("Loading model artifacts…"):
         models  = _load_models(artifact_dir)
         tabular = _load_tabular(artifact_dir)
@@ -3876,6 +3914,13 @@ def main() -> None:
             "Ensure `python train.py` completed successfully.")
         st.stop()
 
+    if "metrics" not in tabular:
+        _render_header()
+        st.error(
+            "`all_metrics.json` not found in `artifacts/`. "
+            "Re-run `python train.py` to regenerate metrics.")
+        st.stop()
+
     # Single _theme() call — palette passed into every chart builder
     t = _theme()
 
@@ -3883,7 +3928,7 @@ def main() -> None:
     _enable_live_clock()   # clock only — no auto-reload
     _render_live_status_strip(t)
 
-    metrics   = tabular.get("metrics", _FALLBACK_METRICS)
+    metrics   = tabular["metrics"]
     best_name = tabular.get("best_model_name", "lightgbm")
     sb = _render_sidebar(metrics, best_name)
 
@@ -3919,14 +3964,17 @@ def main() -> None:
     with tabs[6]:
         _tab_about(tabular, t)
 
-    st.markdown(f"""
-    <div class="dash-footer">
-        London Underground Delay Predictor &nbsp;·&nbsp;
-        COMP1682 Dissertation &nbsp;·&nbsp; University of Greenwich &nbsp;·&nbsp;
-        Built with Streamlit &amp; Plotly &nbsp;·&nbsp;
-        Run: {latest_run} &nbsp;·&nbsp;
-        {datetime.now().strftime("%Y-%m-%d %H:%M")}
-    </div>""", unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="dash-footer">'
+        f'London Underground Delay Predictor &nbsp;·&nbsp; '
+        f'COMP1682 Dissertation &nbsp;·&nbsp; University of Greenwich &nbsp;·&nbsp; '
+        f'Built with Streamlit &amp; Plotly &nbsp;·&nbsp; '
+        f'Run: {latest_run} &nbsp;·&nbsp; '
+        f'{datetime.now().strftime("%Y-%m-%d %H:%M")} &nbsp;·&nbsp; '
+        f'{_build_info()}'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
 
 
 if __name__ == "__main__":

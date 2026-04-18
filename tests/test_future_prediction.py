@@ -87,13 +87,14 @@ def test_predict_delay_rejects_invalid_line(predictor):
 
 
 def test_predict_delay_status_label(predictor):
-    predictor.model.predict.return_value = np.array([1.0])
+    # Thresholds are severity-scale (0–2): good_max=0.5, minor_max=1.5
+    predictor.model.predict.return_value = np.array([0.3])
     assert predictor.predict_delay('Central', _future_dt())['status'] == 'Good Service'
 
-    predictor.model.predict.return_value = np.array([4.0])
+    predictor.model.predict.return_value = np.array([1.0])
     assert predictor.predict_delay('Central', _future_dt())['status'] == 'Minor Delays'
 
-    predictor.model.predict.return_value = np.array([15.0])
+    predictor.model.predict.return_value = np.array([1.8])
     assert predictor.predict_delay('Central', _future_dt())['status'] == 'Severe Delays'
 
 

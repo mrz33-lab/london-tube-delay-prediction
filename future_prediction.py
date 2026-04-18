@@ -218,6 +218,12 @@ class FutureDelayPredictor:
 
         return df_row
 
+    def engineer_features(self, line, target_datetime, weather_forecast,
+                          recent_delays):
+        """Public wrapper around _engineer_features for use by external callers."""
+        return self._engineer_features(line, target_datetime, weather_forecast,
+                                       recent_delays)
+
     def _get_confidence_interval(
         self, prediction: float, line: str, alpha: float = 0.05
     ) -> tuple:

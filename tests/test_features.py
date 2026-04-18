@@ -90,26 +90,34 @@ def test_get_feature_columns():
 def test_prepare_features_for_model():
     config = get_config()
 
+    temps = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0]
     df = pd.DataFrame({
         'timestamp': pd.date_range(start='2024-01-01', periods=10, freq='1h'),
         'line': ['Central'] * 10,
         'status': ['Good Service'] * 10,
         'delay_minutes': [5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0],
-        'temp_c': [15.0] * 10,
-        'lag_delay_1': [np.nan, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0]
+        'temp_c': temps,
+        'lag_delay_1': [np.nan, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0],
+        'some_measure': [np.nan, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
     })
 
-    feature_columns = ['temp_c', 'lag_delay_1', 'line']
+    feature_columns = ['temp_c', 'lag_delay_1', 'line', 'some_measure']
 
     X, y = prepare_features_for_model(df, feature_columns, 'delay_minutes')
 
     assert len(X) == len(y)
     assert len(X) <= len(df)
-
-    # numeric NaNs should be filled with 0
-    assert not X['lag_delay_1'].isna().any()
-
     assert X.shape[1] == len(feature_columns)
+
+    # lag_ features: NaN → 0 (no prior history, not a missing measurement)
+    assert not X['lag_delay_1'].isna().any()
+    assert X['lag_delay_1'].iloc[0] == 0.0
+
+    # non-temporal NaN → median of the non-NaN values
+    non_nan_vals = pd.Series([2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0])
+    expected_median = non_nan_vals.median()
+    assert not X['some_measure'].isna().any()
+    assert X['some_measure'].iloc[0] == pytest.approx(expected_median)
 
 
 def test_interaction_features():

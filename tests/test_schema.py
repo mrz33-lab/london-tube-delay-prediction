@@ -160,9 +160,10 @@ def test_timestamp_consistency():
 
     for line in df['line'].unique():
         line_df = df[df['line'] == line]
-        timestamps = line_df['timestamp'].values
-
-        assert all(timestamps[i] <= timestamps[i+1] for i in range(len(timestamps)-1))
+        ts = pd.Series(line_df['timestamp'].values)
+        assert (ts.diff().dropna() >= pd.Timedelta(0)).all(), (
+            f"Timestamps out of order for line '{line}'"
+        )
 
 
 if __name__ == '__main__':
