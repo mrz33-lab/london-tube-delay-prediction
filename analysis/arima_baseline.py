@@ -248,8 +248,8 @@ def run() -> None:
 
     ax.set_xticks(x)
     ax.set_xticklabels(valid["line"], rotation=30, ha="right")
-    ax.set_ylabel("MAE (minutes)")
-    ax.set_title("ARIMA vs LightGBM MAE per Tube Line")
+    ax.set_ylabel("MAE (delay_severity units: 0=Good, 1=Minor, 2=Severe)")
+    ax.set_title("ARIMA vs LightGBM MAE per Tube Line (delay_severity scale)")
     ax.legend()
     plt.tight_layout()
 
