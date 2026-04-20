@@ -8,6 +8,7 @@ demand factors for the London Underground delay prediction pipeline.
 > **Note**: This procedural system is a synthetic proxy. For real deployments,
 > integrate an actual human-maintained events and engineering works calendar.
 """
+import functools
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, date
@@ -464,6 +465,7 @@ def create_events_template(output_path: Optional[Path] = None) -> Path:
 # Public API
 # ---------------------------------------------------------------------------
 
+@functools.lru_cache(maxsize=32)
 def generate_event_calendar(
     start_date: date,
     end_date: date,

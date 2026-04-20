@@ -74,14 +74,7 @@ build/
 htmlcov/
 .pytest_cache/
 
-# ── Misc tool artifacts ────────────────────────────────────────────────────────
-.antigravityignore
-
 # ── Environment variables ─────────────────────────────────────────────────────
 .env
 .env.*
 !.env.example
-
-# ── AI tools ─────────────────────────────────────────────────────
-.claude
-.gemini

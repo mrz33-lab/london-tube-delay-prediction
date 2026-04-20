@@ -137,9 +137,10 @@ def run() -> None:
     records = []
 
     for line in lines:
-        # Raw (un-engineered) delay series per line in chronological order
+        # Raw delay series per line — use same target scale as LightGBM (delay_severity)
+        # so ARIMA MAE and LightGBM MAE are directly comparable.
         line_df    = df[df["line"] == line].sort_values("timestamp")
-        all_delays = line_df["delay_minutes"].values
+        all_delays = line_df["delay_severity"].values
         n_train    = int(len(line_df) * config.models.train_ratio)
 
         train_series = pd.Series(all_delays[:n_train])

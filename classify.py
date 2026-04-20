@@ -155,11 +155,15 @@ def _evaluate_classifier(
     except Exception as e:
         logger.warning('Could not compute ROC-AUC: %s', e)
 
-    # Per-class metrics — supply explicit labels so the report works even when
-    # some classes are absent from the test split (e.g. small synthetic sets).
+    # Per-class metrics — match label dtype: integer ordinals vs. string names.
+    labels_for_report = (
+        list(range(len(class_names)))
+        if np.issubdtype(np.array(y_test).dtype, np.integer)
+        else class_names
+    )
     report = classification_report(
         y_test, y_pred,
-        labels=list(range(len(class_names))),
+        labels=labels_for_report,
         target_names=class_names,
         output_dict=True,
         zero_division=0,

@@ -160,7 +160,12 @@ class FutureDelayPredictor:
 
         # lag / rolling — use recent history if available, otherwise defaults
         if recent_delays is not None and len(recent_delays) > 0:
-            delays = recent_delays['delay_minutes']
+            # Prefer severity (0–2) to match training scale; fall back to minutes.
+            delays = (
+                recent_delays['delay_severity']
+                if 'delay_severity' in recent_delays.columns
+                else recent_delays['delay_minutes']
+            )
             f['lag_delay_1'] = delays.iloc[-1]
             f['lag_delay_3'] = delays.iloc[-3] if len(delays) >= 3 else delays.iloc[-1]
             f['rolling_mean_delay_3'] = delays.tail(3).mean()

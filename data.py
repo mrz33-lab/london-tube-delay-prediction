@@ -205,10 +205,10 @@ def generate_synthetic_data(config: Config) -> pd.DataFrame:
             delay += rng.exponential(1.5)
             delay = max(0, delay)
 
-            # assign status from delay thresholds
-            if delay < config.data.status_good_max:
+            # assign status from minute-based thresholds (synthetic generation only)
+            if delay < 5:
                 status = 'Good Service'
-            elif delay < config.data.status_minor_max:
+            elif delay < 15:
                 status = 'Minor Delays'
             else:
                 status = 'Severe Delays'

@@ -748,7 +748,8 @@ def main():
             y_test, y_pred_best, mean_absolute_error,
             n_bootstrap=config.models.n_bootstrap, block_size=block_size, rng=_bootstrap_rng
         )
-        _rmse = lambda y_t, y_p: float(np.sqrt(mean_squared_error(y_t, y_p)))
+        def _rmse(y_t: np.ndarray, y_p: np.ndarray) -> float:
+            return float(np.sqrt(mean_squared_error(y_t, y_p)))
         rmse_point, rmse_lower, rmse_upper = bootstrap_confidence_interval(
             y_test, y_pred_best, _rmse,
             n_bootstrap=config.models.n_bootstrap, block_size=block_size, rng=_bootstrap_rng

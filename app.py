@@ -36,6 +36,7 @@ ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
 
 from config import get_config
+from data_collection import LINE_CROWDING_WEIGHT as CROWDING_WEIGHTS
 from events import VENUES, generate_event_calendar
 from utils import get_latest_run_id
 from app.map_data import LINE_PATHS, INTERCHANGE_STATIONS
@@ -62,12 +63,6 @@ LINE_COLOURS: Dict[str, str] = {
 
 LINE_NAMES: List[str] = list(LINE_COLOURS.keys())
 
-# Crowding weights — mirrored from data_collection.LINE_CROWDING_WEIGHT
-CROWDING_WEIGHTS: Dict[str, float] = {
-    "Central": 0.15, "Jubilee": 0.12, "Northern": 0.12, "Victoria": 0.10,
-    "Piccadilly": 0.08, "District": 0.06, "Metropolitan": 0.05, "Circle": 0.04,
-    "Bakerloo": 0.04, "Hammersmith & City": 0.04, "Waterloo & City": 0.02,
-}
 
 # Status thresholds match config.data.status_good_max / status_minor_max.
 # Model target is delay_severity (0=Good, 1=Minor, 2=Severe); use midpoints.
